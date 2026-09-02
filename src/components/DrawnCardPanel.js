@@ -1,6 +1,7 @@
+// src/components/DrawnCardPanel.js — Floating panel for drawn card decisions
+
 import { createCard } from './Card.js';
 import { isActionCard, getActionName } from '../game/CardUtils.js';
-import clientState from '../game/ClientState.js';
 
 /**
  * Create the drawn card decision panel.
@@ -51,7 +52,7 @@ export function createDrawnCardPanel(card, { onSwap, onDiscard, onPlayAction, on
     }
     actions.appendChild(slotBtns);
   } else {
-    // Plain card: show swap options — any slot is valid
+    // Plain card: show swap options — player plays blind, no card value hints
     const swapLabel = document.createElement('div');
     swapLabel.style.cssText = 'font-size:0.75rem;color:var(--text-secondary);font-weight:600;';
     swapLabel.textContent = 'Swap with any slot:';
@@ -61,26 +62,14 @@ export function createDrawnCardPanel(card, { onSwap, onDiscard, onPlayAction, on
     slotBtns.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;';
     for (let i = 0; i < 3; i++) {
       const btn = document.createElement('button');
-      const knownCard = clientState.knownCards[i];
-
       btn.className = 'btn btn-primary btn-sm';
-      if (knownCard) {
-        btn.textContent = `#${i + 1} (${knownCard.rank})`;
-        btn.title = `Swap slot #${i + 1}: replace ${knownCard.rank} with ${card.rank}`;
-      } else {
-        btn.textContent = `Slot #${i + 1} (?)`;
-        btn.title = `Swap with slot #${i + 1}`;
-      }
-
+      btn.textContent = `Slot #${i + 1}`;
+      btn.title = `Swap drawn card into slot #${i + 1}`;
       btn.addEventListener('click', () => onSwap(i));
       slotBtns.appendChild(btn);
     }
     actions.appendChild(slotBtns);
 
-    const hintText = document.createElement('div');
-    hintText.style.cssText = 'font-size:0.7rem;color:var(--text-muted);max-width:240px;line-height:1.2;margin-top:2px;';
-    hintText.textContent = '⚠️ High risk: you can replace any card — even a low one!';
-    actions.appendChild(hintText);
   }
 
   // Discard option
