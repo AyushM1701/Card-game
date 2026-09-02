@@ -1,0 +1,335 @@
+/* ══════════════════════════════════════════════════════
+   cards.css — Card Styles & Interactions
+   ══════════════════════════════════════════════════════ */
+
+/* ─── Card Dimensions ───────────────────────────────── */
+:root {
+  --card-width: 48px;
+  --card-height: 68px;
+  --card-radius: 6px;
+  --card-width-lg: 80px;
+  --card-height-lg: 114px;
+}
+
+/* ─── Card Container (3D flip) ──────────────────────── */
+.card {
+  width: var(--card-width);
+  height: var(--card-height);
+  perspective: 600px;
+  cursor: pointer;
+  position: relative;
+  flex-shrink: 0;
+}
+
+.card-lg {
+  --card-width: var(--card-width-lg);
+  --card-height: var(--card-height-lg);
+}
+
+.card-inner {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  transition: transform 0.6s var(--ease-out);
+  transform-style: preserve-3d;
+}
+
+.card.flipped .card-inner {
+  transform: rotateY(180deg);
+}
+
+/* ─── Card Face & Back ──────────────────────────────── */
+.card-front,
+.card-back {
+  position: absolute;
+  inset: 0;
+  border-radius: var(--card-radius);
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+  box-shadow: 0 2px 8px var(--card-shadow);
+  overflow: hidden;
+}
+
+/* ─── Card Back Design ──────────────────────────────── */
+.card-back {
+  background: var(--card-back);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.card-back-pattern {
+  position: absolute;
+  inset: 4px;
+  border-radius: calc(var(--card-radius) - 2px);
+  border: 2px solid var(--card-back-pattern);
+  background: repeating-linear-gradient(
+    45deg,
+    transparent,
+    transparent 4px,
+    hsla(0, 0%, 100%, 0.03) 4px,
+    hsla(0, 0%, 100%, 0.03) 8px
+  );
+}
+
+.card-back-emblem {
+  position: relative;
+  z-index: 1;
+  width: 24px;
+  height: 24px;
+  background: var(--gold);
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2L9.19 8.63 2 9.24l5.46 4.73L5.82 21 12 17.27 18.18 21l-1.64-7.03L22 9.24l-7.19-.61z'/%3E%3C/svg%3E");
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2L9.19 8.63 2 9.24l5.46 4.73L5.82 21 12 17.27 18.18 21l-1.64-7.03L22 9.24l-7.19-.61z'/%3E%3C/svg%3E");
+  mask-size: contain;
+  -webkit-mask-size: contain;
+}
+
+/* ─── Card Front Design ─────────────────────────────── */
+.card-front {
+  background: var(--card-face);
+  transform: rotateY(180deg);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  color: var(--card-black);
+}
+
+.card-front.red {
+  color: var(--card-red);
+}
+
+.card-rank-top {
+  position: absolute;
+  top: 4px;
+  left: 6px;
+  font-family: var(--font-heading);
+  font-weight: 700;
+  font-size: 12px;
+  line-height: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.card-rank-top .suit-mini {
+  font-size: 10px;
+  line-height: 1;
+}
+
+.card-rank-bottom {
+  position: absolute;
+  bottom: 4px;
+  right: 6px;
+  font-family: var(--font-heading);
+  font-weight: 700;
+  font-size: 12px;
+  line-height: 1;
+  transform: rotate(180deg);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.card-rank-bottom .suit-mini {
+  font-size: 10px;
+  line-height: 1;
+}
+
+.card-center-suit {
+  font-size: 28px;
+  line-height: 1;
+  user-select: none;
+}
+
+.card-lg .card-rank-top,
+.card-lg .card-rank-bottom {
+  font-size: 16px;
+}
+
+.card-lg .card-rank-top .suit-mini,
+.card-lg .card-rank-bottom .suit-mini {
+  font-size: 14px;
+}
+
+.card-lg .card-center-suit {
+  font-size: 40px;
+}
+
+/* ─── Card Action Badge ─────────────────────────────── */
+.card-action-badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  background: var(--gold);
+  color: var(--bg-primary);
+  font-size: 9px;
+  font-weight: 700;
+  padding: 2px 5px;
+  border-radius: var(--radius-full);
+  z-index: 10;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  box-shadow: 0 2px 6px var(--gold-glow);
+}
+
+/* ─── Card Hover / Interactive States ────────────────── */
+.card-interactive {
+  transition: transform var(--duration-normal) var(--ease-out),
+              box-shadow var(--duration-normal) var(--ease-out);
+}
+
+.card-interactive:hover {
+  transform: translateY(-8px) scale(1.05);
+}
+
+.card-interactive:hover .card-front,
+.card-interactive:hover .card-back {
+  box-shadow: 0 8px 24px var(--card-shadow);
+}
+
+/* ─── Card Slot (empty slot indicator) ───────────────── */
+.card-slot {
+  width: var(--card-width);
+  height: var(--card-height);
+  border: 2px dashed hsla(0, 0%, 100%, 0.15);
+  border-radius: var(--card-radius);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  transition: all var(--duration-normal);
+}
+
+.card-slot.valid-target {
+  border-color: var(--success);
+  background: hsla(145, 65%, 42%, 0.1);
+  box-shadow: 0 0 12px hsla(145, 65%, 42%, 0.2);
+}
+
+.card-slot.invalid-target {
+  border-color: var(--danger);
+  background: hsla(0, 72%, 52%, 0.1);
+}
+
+.card-slot.highlight {
+  border-color: var(--gold);
+  background: hsla(43, 85%, 55%, 0.1);
+  animation: pulseGlow 2s ease-in-out infinite;
+}
+
+/* ─── Swappable Card Indicator ───────────────────────── */
+.card-swappable {
+  animation: swapPulse 1.5s ease-in-out infinite;
+  cursor: pointer;
+}
+
+.card-swappable:hover {
+  transform: translateY(-14px) rotate(0deg) scale(1.08) !important;
+  filter: drop-shadow(0 0 12px var(--gold-glow));
+  z-index: 20;
+}
+
+@keyframes swapPulse {
+  0%, 100% { filter: drop-shadow(0 0 4px hsla(43, 85%, 55%, 0.3)); }
+  50%      { filter: drop-shadow(0 0 10px hsla(43, 85%, 55%, 0.7)); }
+}
+
+/* ─── Card Stack (draw pile) ─────────────────────────── */
+.card-stack {
+  position: relative;
+  width: var(--card-width);
+  height: var(--card-height);
+}
+
+.card-stack .card {
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+
+.card-stack .card:nth-child(1) {
+  transform: translate(0, 0);
+}
+.card-stack .card:nth-child(2) {
+  transform: translate(1px, -1px);
+}
+.card-stack .card:nth-child(3) {
+  transform: translate(2px, -2px);
+}
+.card-stack .card:nth-child(4) {
+  transform: translate(3px, -3px);
+}
+
+/* ─── Card Deal Animation ────────────────────────────── */
+.card-dealing {
+  animation: cardDeal 0.5s var(--ease-spring) forwards;
+}
+
+.card-dealing:nth-child(1) { animation-delay: 0ms; }
+.card-dealing:nth-child(2) { animation-delay: 150ms; }
+.card-dealing:nth-child(3) { animation-delay: 300ms; }
+
+/* ─── Drawn Card Panel ──────────────────────────────── */
+.drawn-card-panel {
+  position: fixed;
+  bottom: var(--space-xl);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 100;
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-lg);
+  padding: var(--space-lg);
+  background: var(--glass-bg);
+  backdrop-filter: blur(20px);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-xl);
+  animation: fadeInUp var(--duration-slow) var(--ease-out);
+}
+
+.drawn-card-panel .card {
+  --card-width: var(--card-width-lg);
+  --card-height: var(--card-height-lg);
+}
+
+.drawn-card-actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+/* ─── Card Fan (hand of 3) ──────────────────────────── */
+.card-fan {
+  display: flex;
+  gap: 6px;
+  justify-content: center;
+  padding: var(--space-sm);
+}
+
+.card-fan .card {
+  transition: transform var(--duration-normal) var(--ease-spring);
+}
+
+.card-fan .card:nth-child(1) {
+  transform: rotate(-5deg);
+}
+.card-fan .card:nth-child(2) {
+  transform: rotate(0deg);
+}
+.card-fan .card:nth-child(3) {
+  transform: rotate(5deg);
+}
+
+.card-fan .card:hover {
+  transform: translateY(-12px) rotate(0deg) !important;
+  z-index: 10;
+}
+
+/* ─── Scramble Animation ─────────────────────────────── */
+.card-scrambling {
+  animation: scrambleShake 0.8s ease-in-out;
+}

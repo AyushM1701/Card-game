@@ -1,0 +1,29 @@
+{
+  "name": "mind-fuck-card-game",
+  "version": "1.0.0",
+  "description": "MIND F*CK — Online multiplayer card game",
+  "type": "module",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "dev": "concurrently \"nodemon --watch server server/index.js\" \"vite\"",
+    "dev:server": "nodemon --watch server server/index.js",
+    "dev:client": "vite",
+    "build": "vite build",
+    "build:start": "vite build && node server/index.js",
+    "start": "node server/index.js",
+    "test": "node --test server/tests/*.test.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "socket.io": "^4.7.4",
+    "socket.io-client": "^4.7.4",
+    "uuid": "^9.0.0"
+  },
+  "devDependencies": {
+    "vite": "^5.4.0",
+    "concurrently": "^8.2.2",
+    "nodemon": "^3.1.0"
+  }
+}
