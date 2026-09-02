@@ -1,7 +1,5 @@
-// src/components/DrawnCardPanel.js — Floating panel for drawn card decisions
-
 import { createCard } from './Card.js';
-import { isActionCard, getActionName, canSwapPlain } from '../game/CardUtils.js';
+import { isActionCard, getActionName } from '../game/CardUtils.js';
 import clientState from '../game/ClientState.js';
 
 /**
@@ -53,10 +51,10 @@ export function createDrawnCardPanel(card, { onSwap, onDiscard, onPlayAction, on
     }
     actions.appendChild(slotBtns);
   } else {
-    // Plain card: show swap options with valid indicators
+    // Plain card: show swap options — any slot is valid
     const swapLabel = document.createElement('div');
     swapLabel.style.cssText = 'font-size:0.75rem;color:var(--text-secondary);font-weight:600;';
-    swapLabel.textContent = 'Swap with a HIGHER slot:';
+    swapLabel.textContent = 'Swap with any slot:';
     actions.appendChild(swapLabel);
 
     const slotBtns = document.createElement('div');
@@ -64,23 +62,14 @@ export function createDrawnCardPanel(card, { onSwap, onDiscard, onPlayAction, on
     for (let i = 0; i < 3; i++) {
       const btn = document.createElement('button');
       const knownCard = clientState.knownCards[i];
-      const valid = knownCard ? canSwapPlain(card, knownCard) : true; // If unknown, allow attempt
 
+      btn.className = 'btn btn-primary btn-sm';
       if (knownCard) {
-        if (valid) {
-          btn.className = 'btn btn-primary btn-sm';
-          btn.textContent = `#${i + 1} (${knownCard.rank}) ⬇️`;
-          btn.title = `Swap: replace ${knownCard.rank} with lower ${card.rank}`;
-        } else {
-          btn.className = 'btn btn-secondary btn-sm';
-          btn.style.opacity = '0.55';
-          btn.textContent = `#${i + 1} (${knownCard.rank}) 🚫`;
-          btn.title = `Cannot swap: drawn ${card.rank} is higher than slot ${knownCard.rank}`;
-        }
+        btn.textContent = `#${i + 1} (${knownCard.rank})`;
+        btn.title = `Swap slot #${i + 1}: replace ${knownCard.rank} with ${card.rank}`;
       } else {
-        btn.className = 'btn btn-secondary btn-sm';
         btn.textContent = `Slot #${i + 1} (?)`;
-        btn.title = `Attempt swap with slot #${i + 1}`;
+        btn.title = `Swap with slot #${i + 1}`;
       }
 
       btn.addEventListener('click', () => onSwap(i));
@@ -90,7 +79,7 @@ export function createDrawnCardPanel(card, { onSwap, onDiscard, onPlayAction, on
 
     const hintText = document.createElement('div');
     hintText.style.cssText = 'font-size:0.7rem;color:var(--text-muted);max-width:240px;line-height:1.2;margin-top:2px;';
-    hintText.textContent = '💡 Rule: Plain cards can only replace higher cards. Discard if you drew higher.';
+    hintText.textContent = '⚠️ High risk: you can replace any card — even a low one!';
     actions.appendChild(hintText);
   }
 

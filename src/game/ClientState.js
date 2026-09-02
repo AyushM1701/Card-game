@@ -196,6 +196,10 @@ class ClientState {
   // After a swap, we know the drawn card is now in the slot
   recordSwap(slotIndex, newCard) {
     this.knownCards[slotIndex] = { ...newCard };
+    // Keep myCards in sync so the peek-my-cards overlay shows accurate current hand
+    if (this.myCards[slotIndex] !== undefined) {
+      this.myCards[slotIndex] = { ...newCard };
+    }
     this.drawnCard = null;
     this._emit('stateChange', { type: 'swap-recorded' });
   }

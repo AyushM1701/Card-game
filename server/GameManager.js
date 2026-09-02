@@ -173,8 +173,7 @@ class GameManager {
 
   /**
    * Swap the drawn card into a hand slot.
-   * For plain cards: must be lower than the slot card's value.
-   * For action cards (banking): can go into any slot.
+   * Any card (plain or action) can replace any slot — no value restriction.
    * @returns {{ success: boolean, displaced?: object, actionTriggered?: string, error?: string }}
    */
   swapCard(roomCode, playerId, slotIndex) {
@@ -189,14 +188,7 @@ class GameManager {
     const slotCard = hand.cards[slotIndex];
     const isDrawnAction = isActionCard(drawnCard);
 
-    // Validate swap rules
-    if (!isDrawnAction) {
-      // Plain card: must be lower than slot card
-      if (drawnCard.value >= slotCard.value) {
-        return { success: false, error: 'Drawn card must be lower than the card in that slot' };
-      }
-    }
-    // Action cards can always be banked (swapped into any slot)
+    // No value restriction — any card can replace any slot (high-risk mechanic)
 
     // Perform the swap
     hand.cards[slotIndex] = drawnCard;

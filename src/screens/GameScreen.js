@@ -118,6 +118,18 @@ function createHUD() {
   });
   right.appendChild(muteBtn);
 
+  // Peek My Cards button (available any time during gameplay)
+  if (!clientState.isSpectator) {
+    const peekBtn = document.createElement('button');
+    peekBtn.className = 'btn btn-ghost btn-sm';
+    peekBtn.id = 'peek-my-cards-btn';
+    peekBtn.style.cssText = 'padding:4px 8px;font-size:13px;border:1px solid hsla(270,80%,70%,0.4);color:hsl(270,80%,80%);';
+    peekBtn.textContent = '👁 My Cards';
+    peekBtn.title = 'Peek at your own cards';
+    peekBtn.addEventListener('click', () => renderPeekMyCards());
+    right.appendChild(peekBtn);
+  }
+
   hud.appendChild(left);
   hud.appendChild(center);
   hud.appendChild(right);
@@ -185,6 +197,73 @@ function renderPeekPhase(app) {
   overlay.appendChild(timer);
   overlay.appendChild(doneBtn);
   app.appendChild(overlay);
+}
+
+/**
+ * Show a temporary peek overlay of the player's current cards (any time during gameplay).
+ * Auto-dismisses after 5 seconds or when clicked.
+ */
+function renderPeekMyCards() {
+  // Prevent stacking multiple peek overlays
+  if (document.getElementById('peek-my-cards-overlay')) return;
+
+  const cards = clientState.myCards;
+  if (!cards || cards.length === 0) {
+    showToast('No cards to peek at.', { type: 'info', icon: '🃏' });
+    return;
+  }
+
+  soundEngine.cardFlip();
+
+  const overlay = document.createElement('div');
+  overlay.className = 'peek-overlay';
+  overlay.id = 'peek-my-cards-overlay';
+  overlay.style.cssText += ';cursor:pointer;';
+
+  const instruction = document.createElement('div');
+  instruction.className = 'peek-instruction';
+  instruction.textContent = 'Your current cards';
+  instruction.style.marginBottom = 'var(--space-lg)';
+
+  const cardsEl = document.createElement('div');
+  cardsEl.className = 'peek-cards';
+  cards.forEach((card, i) => {
+    const cardEl = createCard(card, { faceUp: true, large: true, dealing: true, dealIndex: i });
+    cardsEl.appendChild(cardEl);
+  });
+
+  const timerEl = document.createElement('div');
+  timerEl.className = 'peek-timer';
+  timerEl.id = 'peek-my-cards-timer';
+
+  let seconds = 5;
+  timerEl.textContent = seconds;
+
+  const dismiss = () => {
+    clearInterval(countdown);
+    overlay.style.animation = 'fadeOut 0.4s var(--ease-out) forwards';
+    setTimeout(() => overlay.remove(), 400);
+  };
+
+  overlay.addEventListener('click', dismiss);
+
+  const countdown = setInterval(() => {
+    seconds--;
+    const el = document.getElementById('peek-my-cards-timer');
+    if (el) el.textContent = seconds;
+    if (seconds <= 0) dismiss();
+  }, 1000);
+
+  overlay.appendChild(instruction);
+  overlay.appendChild(cardsEl);
+  overlay.appendChild(timerEl);
+
+  const hint = document.createElement('div');
+  hint.style.cssText = 'font-size:0.75rem;color:var(--text-muted);margin-top:var(--space-md);';
+  hint.textContent = 'Click anywhere to close';
+  overlay.appendChild(hint);
+
+  document.getElementById('app').appendChild(overlay);
 }
 
 function ensureDrawnCardPanel(card = null) {
@@ -258,20 +337,9 @@ function handleSwap(slotIndex) {
   soundEngine.click();
   socketClient.emit('swap-card', { slotIndex }, (res) => {
     if (!res.success) {
-      const drawn = clientState.drawnCard;
-      const rankStr = drawn ? drawn.rank : 'this card';
-      showToast(res.error || `Cannot swap: drawn ${rankStr} is not lower than that slot. Pick a higher slot or click Discard.`, { type: 'warning', icon: '⚠️' });
+      showToast(res.error || 'Swap failed. Please try again.', { type: 'warning', icon: '⚠️' });
       ensureDrawnCardPanel(clientState.drawnCard);
       highlightDrawnCardPanel();
-
-      // Wobble/shake the clicked slot card in the player's hand
-      const slotEl = document.querySelector(`.seat-me .card[data-slot-index="${slotIndex}"]`);
-      if (slotEl) {
-        slotEl.classList.remove('shake-error');
-        void slotEl.offsetWidth;
-        slotEl.classList.add('shake-error');
-        setTimeout(() => slotEl.classList.remove('shake-error'), 600);
-      }
       return;
     }
 
