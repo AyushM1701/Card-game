@@ -73,6 +73,17 @@ function createHUD() {
   roomCode.textContent = `ROOM: ${clientState.roomCode}`;
   left.appendChild(roomCode);
 
+  // Leave Game button
+  if (!clientState.isSpectator) {
+    const leaveBtn = document.createElement('button');
+    leaveBtn.className = 'btn btn-ghost btn-sm hud-leave-btn';
+    leaveBtn.id = 'leave-game-btn';
+    leaveBtn.title = 'Leave game';
+    leaveBtn.innerHTML = '🚪 <span class="hud-leave-label">Leave</span>';
+    leaveBtn.addEventListener('click', () => showLeaveConfirmModal(navigate));
+    left.appendChild(leaveBtn);
+  }
+
   if (clientState.isSpectator) {
     const specBadge = document.createElement('span');
     specBadge.className = 'you-badge';
@@ -560,6 +571,84 @@ function setupGameListeners(navigate) {
   onSocket('player-skipped', (data) => {
     showToast(`${data.playerName}'s turn was skipped (${data.reason || 'disconnected'})`, { type: 'warning', icon: '⏱️' });
   });
+}
+
+/**
+ * Show a confirmation dialog before leaving the game.
+ * Uses the existing #modal-overlay system.
+ */
+function showLeaveConfirmModal(navigate) {
+  soundEngine.click();
+
+  const overlay = document.getElementById('modal-overlay');
+  overlay.innerHTML = '';
+
+  const modal = document.createElement('div');
+  modal.className = 'action-modal leave-confirm-modal';
+
+  const icon = document.createElement('div');
+  icon.className = 'leave-confirm-icon';
+  icon.textContent = '🚪';
+
+  const title = document.createElement('div');
+  title.className = 'leave-confirm-title';
+  title.textContent = 'Leave the game?';
+
+  const body = document.createElement('p');
+  body.className = 'leave-confirm-body';
+  body.textContent = 'Your seat will be lost. The round will continue with a bot filling in for you.';
+
+  const warning = document.createElement('div');
+  warning.className = 'leave-confirm-warning';
+  warning.innerHTML = '⚠️ This cannot be undone. You will return to the lobby.';
+
+  const btnRow = document.createElement('div');
+  btnRow.className = 'leave-confirm-btns';
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'btn btn-secondary btn-lg';
+  cancelBtn.id = 'leave-cancel-btn';
+  cancelBtn.textContent = '↩ Stay';
+  cancelBtn.addEventListener('click', () => {
+    overlay.classList.remove('active');
+    overlay.innerHTML = '';
+  });
+
+  const confirmBtn = document.createElement('button');
+  confirmBtn.className = 'btn leave-confirm-danger btn-lg';
+  confirmBtn.id = 'leave-confirm-btn';
+  confirmBtn.textContent = 'Leave Game';
+  confirmBtn.addEventListener('click', () => {
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = 'Leaving...';
+
+    // Clean up and navigate to lobby
+    cleanupListeners();
+    removeDrawnCardPanel();
+    clientState.clearSession();
+    socketClient.disconnect();
+
+    overlay.classList.remove('active');
+    overlay.innerHTML = '';
+
+    // Small delay so the socket disconnect registers
+    setTimeout(() => {
+      socketClient.connect(); // reconnect for next game
+      navigate('lobby');
+    }, 250);
+  });
+
+  btnRow.appendChild(cancelBtn);
+  btnRow.appendChild(confirmBtn);
+
+  modal.appendChild(icon);
+  modal.appendChild(title);
+  modal.appendChild(body);
+  modal.appendChild(warning);
+  modal.appendChild(btnRow);
+
+  overlay.appendChild(modal);
+  overlay.classList.add('active');
 }
 
 export default { renderGameScreen };

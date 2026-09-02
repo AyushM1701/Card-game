@@ -347,3 +347,113 @@ img {
   background: var(--gold);
   color: var(--bg-primary);
 }
+
+/* ─── HUD Leave Button ───────────────────────────────── */
+.hud-leave-btn {
+  font-size: var(--fs-xs);
+  padding: 4px 8px;
+  color: hsla(0, 72%, 70%, 0.8);
+  border: 1px solid hsla(0, 72%, 52%, 0.25);
+  border-radius: var(--radius-sm);
+  transition: color var(--duration-fast),
+              border-color var(--duration-fast),
+              background var(--duration-fast);
+}
+
+.hud-leave-btn:hover {
+  color: hsl(0, 72%, 75%);
+  border-color: hsla(0, 72%, 52%, 0.55);
+  background: hsla(0, 72%, 52%, 0.1);
+}
+
+/* Hide the text label on very small screens — keep just the icon */
+@media (max-width: 420px) {
+  .hud-leave-label { display: none; }
+}
+
+/* ─── Leave Confirm Modal ────────────────────────────── */
+.leave-confirm-modal {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-md);
+  max-width: 420px;
+  width: calc(100% - var(--space-xl));
+  padding: var(--space-2xl) var(--space-xl);
+  text-align: center;
+  animation: modal-slide-up 0.3s var(--ease-out) both;
+}
+
+@keyframes modal-slide-up {
+  from { opacity: 0; transform: translateY(20px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0)    scale(1); }
+}
+
+.leave-confirm-icon {
+  font-size: 3rem;
+  line-height: 1;
+  filter: drop-shadow(0 0 12px hsla(0, 72%, 52%, 0.4));
+}
+
+.leave-confirm-title {
+  font-family: var(--font-heading);
+  font-size: var(--fs-2xl);
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.leave-confirm-body {
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+  max-width: 320px;
+}
+
+.leave-confirm-warning {
+  font-size: var(--fs-xs);
+  color: hsl(38, 92%, 70%);
+  background: hsla(38, 92%, 55%, 0.08);
+  border: 1px solid hsla(38, 92%, 55%, 0.25);
+  border-radius: var(--radius-sm);
+  padding: var(--space-sm) var(--space-md);
+  width: 100%;
+}
+
+.leave-confirm-btns {
+  display: flex;
+  gap: var(--space-md);
+  width: 100%;
+  margin-top: var(--space-sm);
+}
+
+.leave-confirm-btns .btn {
+  flex: 1;
+}
+
+/* Danger confirm button */
+.leave-confirm-danger {
+  background: hsla(0, 72%, 40%, 0.2);
+  border: 1px solid hsla(0, 72%, 52%, 0.5);
+  color: hsl(0, 85%, 75%);
+  font-weight: 700;
+  transition: background var(--duration-fast),
+              border-color var(--duration-fast),
+              transform var(--duration-fast);
+}
+
+.leave-confirm-danger:hover:not(:disabled) {
+  background: hsla(0, 72%, 40%, 0.35);
+  border-color: hsl(0, 72%, 60%);
+  transform: scale(1.02);
+}
+
+.leave-confirm-danger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Stack buttons vertically on very small screens */
+@media (max-width: 380px) {
+  .leave-confirm-btns { flex-direction: column; }
+  .leave-confirm-modal { padding: var(--space-xl) var(--space-lg); }
+}
