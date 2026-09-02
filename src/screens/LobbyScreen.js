@@ -46,6 +46,14 @@ export function renderLobbyScreen(navigate) {
   subtitle.textContent = 'The strategic memory card game';
   screen.appendChild(subtitle);
 
+  const htpLink = document.createElement('button');
+  htpLink.className = 'btn btn-ghost btn-sm';
+  htpLink.id = 'how-to-play-btn';
+  htpLink.style.cssText = 'margin-top: var(--space-sm); font-size: var(--fs-sm); color: var(--text-muted); border: 1px solid var(--glass-border); letter-spacing: 0.02em;';
+  htpLink.textContent = '📖 How to Play';
+  htpLink.addEventListener('click', () => navigate('how-to-play'));
+  screen.appendChild(htpLink);
+
   // Form container
   const form = document.createElement('div');
   form.className = 'lobby-form glass-card anim-fade-in-up';

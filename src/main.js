@@ -6,6 +6,7 @@ import { renderLobbyScreen } from './screens/LobbyScreen.js';
 import { renderWaitingRoom } from './screens/WaitingRoom.js';
 import { renderGameScreen } from './screens/GameScreen.js';
 import { renderResultsScreen } from './screens/ResultsScreen.js';
+import { renderHowToPlayScreen } from './screens/HowToPlayScreen.js';
 import { showToast } from './components/Toast.js';
 
 // ─── Router ────────────────────────────────────────────
@@ -13,7 +14,8 @@ const screens = {
   lobby: renderLobbyScreen,
   waiting: renderWaitingRoom,
   game: renderGameScreen,
-  results: renderResultsScreen
+  results: renderResultsScreen,
+  'how-to-play': renderHowToPlayScreen
 };
 
 function navigate(screen) {
