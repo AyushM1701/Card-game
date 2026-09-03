@@ -52,3 +52,32 @@ Early builds of this game included a safety check: the server rejected any plain
 On September 2, 2026, we stripped that restriction out. Any card can now overwrite any slot. If you panic and drop an 8 over an Ace, you live with the damage.
 
 The only evidence that would change my mind about keeping the game this harsh is sustained player abandonment. If testing had shown players leaving rooms out of sheer frustration, the rule would have had to soften. During our testing runs, the opposite happened. Tables fell apart when the game moved slowly under safe calculations; tables stayed full when a player confidently traded away their middle card only to realize they handed their opponent a winning hand.
+
+### Technical Architecture
+
+The codebase separates an authoritative Node.js game engine from a dependency-light browser client.
+
+#### Authoritative Backend (Node.js + Socket.IO)
+
+Card state never lives on the client. If a browser could inspect its own memory to read face-down cards, anyone opening Chrome DevTools could see their layout.
+
+The server (`server/GameManager.js`) manages the deck, deal orders, draw piles, and hidden card values. When the server pushes table updates to players, it calls `getPlayerView()`. That method redacts all opponent cards into blank count objects. Your client receives the exact ranks and suits of your own cards during the initial eight-second peek, after which the client state drops those values from memory and treats them as unknown slots unless you play a King.
+
+The server layer splits across four modules:
+
+* `server/GameManager.js` tracks phase transitions (`peek_phase`, `playing`, `round_over`), turn advancement, and card resolution.
+* `server/RoomManager.js` handles six-character room codes, seat allocations, player disconnect timeouts, and spectator broadcasting.
+* `server/BotEngine.js` drives automated players using heuristic decision trees with simulated human latency between 800ms and 2200ms.
+* `server/socketHandlers.js` maps incoming Socket.IO events into game state mutations and broadcasts room events.
+
+In production, Express serves the compiled client bundle directly from `dist/` on the same HTTP port running Socket.IO. This keeps deployment to a single process on Render without cross-origin configuration.
+
+#### Client Implementation (Vanilla ES6 + Vite)
+
+The client is built with plain JavaScript modules without React, Vue, or Tailwind. Card games are state-driven DOM graphs with heavy geometric transitions. React's reconciliation cycle adds overhead without solving any problem that CSS custom properties and direct DOM operations do not handle faster.
+
+* Table geometry: The table (`src/components/Table.js`) places up to ten seats along an ellipse using trigonometric mapping. Every client rotates the table so the local player sits at the bottom center. Opponents are distributed along the perimeter by projecting angles $\theta = \frac{2\pi \cdot i}{N}$ into coordinate space.
+* Card flight engine: When a card moves from the draw pile into a seat, `src/game/CardAnimationEngine.js` reads the bounding rectangles of both DOM nodes, creates a temporary card on an isolated animation layer, and drives it through a 3D arc using CSS `transform` and cubic-bezier transition curves.
+* Procedural audio: `src/game/SoundEngine.js` generates all card flips, deals, and turn notifications directly through the browser Web Audio API using oscillators, white-noise buffers, and gain envelopes. The game downloads zero MP3 or WAV files over the network.
+* SPA routing: `src/main.js` switches between `lobby`, `waiting`, `game`, `how-to-play`, and `results` screens by swapping root DOM nodes, keeping bundle size under 120KB minified.
+
