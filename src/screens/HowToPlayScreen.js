@@ -236,24 +236,28 @@ function buildActionCardsSection() {
   intro.innerHTML = 'Four special cards change everything. Play them for an instant effect or bank them to hold their power.';
   sec.appendChild(intro);
 
+  // NOTE: colors are stored as raw "H, S%, L%" component strings (matching
+  // the pattern used by makeSection/colorVar elsewhere in this file), not as
+  // full `hsl(...)` strings. That's what lets us build both a solid color
+  // and a translucent border/background from the same value with hsla().
   const actions = [
     {
-      rank: 'K', name: 'King — Peek Own', color: 'hsl(43, 85%, 55%)',
+      rank: 'K', name: 'King — Peek Own', hsl: '43, 85%, 55%',
       desc: 'Secretly look at all 3 of your own cards. The <strong>only</strong> way to re-check your hand during the game.',
-      badge: '\u265a', tip: 'Use it when you\'ve genuinely forgotten what\'s in a slot. Muscle memory wins.',
+      badge: 'K', tip: 'Use it when you\'ve genuinely forgotten what\'s in a slot. Muscle memory wins.',
     },
     {
-      rank: 'Q', name: 'Queen — Peek Opponent', color: 'hsl(280, 70%, 65%)',
+      rank: 'Q', name: 'Queen — Peek Opponent', hsl: '280, 70%, 65%',
       desc: 'Secretly look at all 3 cards of any opponent. You know their hand \u2014 they don\'t know you know.',
-      badge: '♛', tip: 'Best played when you\'re close to winning and need to compare.',
+      badge: 'Q', tip: 'Best played when you\'re close to winning and need to compare.',
     },
     {
-      rank: 'J', name: 'Jack — Blind Trade', color: 'hsl(210, 80%, 58%)',
+      rank: 'J', name: 'Jack — Blind Trade', hsl: '210, 80%, 58%',
       desc: 'Swap one of your card slots with one of an opponent\'s. <em>Neither player looks at either card.</em> Pure chaos.',
-      badge: '♝', tip: 'Target the opponent who seems most confident \u2014 they probably have a low card. Trade your worst slot.',
+      badge: 'J', tip: 'Target the opponent who seems most confident \u2014 they probably have a low card. Trade your worst slot.',
     },
     {
-      rank: '7', name: 'Seven — Scramble', color: 'hsl(0, 72%, 52%)',
+      rank: '7', name: 'Seven — Scramble', hsl: '0, 72%, 52%',
       desc: 'Randomly rearrange all 3 of an opponent\'s card positions without looking. Everything they memorized becomes useless.',
       badge: '7', tip: 'Devastating on a player who just used a King. They memorized... and now it\'s all wrong.',
     },
@@ -263,11 +267,13 @@ function buildActionCardsSection() {
   grid.className = 'htp-action-grid';
 
   actions.forEach(a => {
+    const solid = `hsl(${a.hsl})`;
+    const border = `hsla(${a.hsl}, 0.4)`;
     const card = document.createElement('div');
     card.className = 'htp-action-card glass-card';
     card.innerHTML = `
-      <div class="htp-action-rank" style="color: ${a.color}; border-color: ${a.color}40;">${a.badge}</div>
-      <div class="htp-action-name" style="color: ${a.color}">${a.name}</div>
+      <div class="htp-action-rank" style="color: ${solid}; border-color: ${border};">${a.badge}</div>
+      <div class="htp-action-name" style="color: ${solid}">${a.name}</div>
       <p class="htp-action-desc">${a.desc}</p>
       <div class="htp-action-tip">💡 ${a.tip}</div>
     `;
@@ -336,7 +342,7 @@ function buildEndSection() {
         <strong>Add Up</strong>
         <p>Sum your 3 card values. Aces count as 1.</p>
       </div>
-      <div class="htp-end-item" style="border-color: hsl(43,85%,55%,0.3); background: hsla(43,85%,55%,0.06)">
+      <div class="htp-end-item" style="border-color: hsla(43, 85%, 55%, 0.3); background: hsla(43,85%,55%,0.06)">
         <div class="htp-end-icon">🥇</div>
         <strong style="color: hsl(43,85%,65%)">Lowest Wins!</strong>
         <p>The player with the smallest total takes the round.</p>

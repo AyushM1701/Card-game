@@ -29,6 +29,7 @@ const fileOrder = [
   'src/screens/WaitingRoom.js',
   'src/screens/GameScreen.js',
   'src/screens/ResultsScreen.js',
+  'src/screens/HowToPlayScreen.js',
   'src/components/Table.js',
   'src/components/Seat.js',
   'src/components/Card.js',
@@ -41,6 +42,7 @@ const fileOrder = [
   'src/styles/table.css',
   'src/styles/cards.css',
   'src/styles/animations.css',
+  'src/styles/howtoplay.css',
   'scripts/build_source_doc.js'
 ];
 

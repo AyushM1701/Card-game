@@ -32,6 +32,15 @@ test('RoomManager — Reconnection Token Security', () => {
   const fakeTokenReconnect = rm.reconnectPlayer(room.code, host.id, 'sock_new', 'wrong-token-12345');
   assert.equal(fakeTokenReconnect, null);
 
+  // Attempt reconnect with NULL or UNDEFINED token -> must be rejected
+  assert.equal(rm.reconnectPlayer(room.code, host.id, 'sock_new', null), null);
+  assert.equal(rm.reconnectPlayer(room.code, host.id, 'sock_new', undefined), null);
+
+  // Attempt joinRoom reconnect with NULL token -> must fail
+  const joinWithNullToken = rm.joinRoom(room.code, 'Alice', 'sock_new', host.id, null);
+  assert.equal(joinWithNullToken.success, false);
+  assert.equal(joinWithNullToken.error, 'Unauthorized reconnection attempt.');
+
   // Attempt reconnect with CORRECT token -> must succeed
   const validReconnect = rm.reconnectPlayer(room.code, host.id, 'sock_new', originalToken);
   assert.ok(validReconnect);
@@ -64,3 +73,36 @@ test('RoomManager — Bot Addition and Removal', () => {
   assert.equal(room.players.length, 2);
   assert.equal(room.players.some(p => p.id === bot1.id), false);
 });
+
+test('RoomManager — Lowercase room code lookup and disconnect handling', () => {
+  const rm = new RoomManager();
+  const room = rm.createRoom('HostPlayer', 'sock_host', 4, 1);
+
+  // Guest joins with lowercase room code
+  const joinRes = rm.joinRoom(room.code.toLowerCase(), 'GuestPlayer', 'sock_guest');
+  assert.ok(joinRes.success);
+  assert.equal(joinRes.room.code, room.code);
+
+  // getRoomBySocket must resolve room even when joined via lowercase
+  const socketRoom = rm.getRoomBySocket('sock_guest');
+  assert.ok(socketRoom);
+  assert.equal(socketRoom.code, room.code);
+
+  // handleDisconnect must resolve room even when joined via lowercase
+  const dcRes = rm.handleDisconnect('sock_guest');
+  assert.ok(dcRes);
+  assert.equal(dcRes.roomCode, room.code);
+});
+
+test('RoomManager — Fresh playerId generation for new joins (No Client ID Spoofing)', () => {
+  const rm = new RoomManager();
+  const room = rm.createRoom('HostPlayer', 'sock_host', 4, 1);
+
+  // Client attempts to pass an arbitrary playerId during initial join
+  const joinRes = rm.joinRoom(room.code, 'GuestPlayer', 'sock_guest', 'client_spoofed_id_999');
+  assert.ok(joinRes.success);
+  // Server must NOT adopt client-provided ID for new player instances
+  assert.notEqual(joinRes.player.id, 'client_spoofed_id_999');
+  assert.ok(joinRes.player.id.length > 20); // Valid UUID
+});
+

@@ -237,6 +237,9 @@ Implemented in `server/BotEngine.js`:
   "version": "1.0.0",
   "description": "MIND F*CK — Online multiplayer card game",
   "type": "module",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "scripts": {
     "dev": "concurrently \"nodemon --watch server server/index.js\" \"vite\"",
     "dev:server": "nodemon --watch server server/index.js",
@@ -340,6 +343,7 @@ CLIENT_ORIGIN=http://localhost:3000
   <link rel="stylesheet" href="/src/styles/animations.css" />
   <link rel="stylesheet" href="/src/styles/cards.css" />
   <link rel="stylesheet" href="/src/styles/table.css" />
+  <link rel="stylesheet" href="/src/styles/howtoplay.css" />
 </head>
 <body>
   <div id="app"></div>
@@ -388,9 +392,26 @@ const allowedOrigins = process.env.CLIENT_ORIGIN
   ? process.env.CLIENT_ORIGIN.split(',').map(s => s.trim()).filter(Boolean)
   : ['http://localhost:3000'];
 
+const isOriginAllowed = (origin) => {
+  if (!origin) return true; // same-origin or server-to-server requests
+  if (allowedOrigins.includes(origin) || allowedOrigins.includes('*')) return true;
+  try {
+    const parsed = new URL(origin);
+    if (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1') return true;
+    if (parsed.hostname.endsWith('.onrender.com')) return true;
+  } catch {}
+  return false;
+};
+
 const io = new Server(httpServer, {
   cors: {
-    origin: allowedOrigins,
+    origin: (origin, callback) => {
+      if (isOriginAllowed(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error('CORS not allowed'));
+      }
+    },
     methods: ['GET', 'POST']
   }
 });
@@ -420,6 +441,19 @@ io.use((socket, next) => {
 });
 
 // API routes
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (isOriginAllowed(origin)) {
+    if (origin) res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  }
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+  next();
+});
+
 app.use(express.json());
 
 app.get('/health', (req, res) => {
@@ -551,6 +585,7 @@ class GameManager {
   startNextRound(room) {
     const game = this.games.get(room.code);
     if (!game) return null;
+    if (game.roundNumber >= (game.totalRounds || 1)) return null;
 
     const { deck, hands } = this._dealHands(room);
 
@@ -563,6 +598,7 @@ class GameManager {
     game.drawPile = deck;
     game.discardPile = [];
     game.hands = hands;
+    game.playerOrder = room.players.map(p => p.id);
     game.currentPlayerIndex = 0;
     game.drawnCard = null;
     game.drawnByPlayerId = null;
@@ -571,13 +607,22 @@ class GameManager {
     game.roundNumber += 1;
     game.roundOverEmitted = false;
 
+    // Ensure all players have an initialized score entry
+    for (const player of room.players) {
+      if (game.scores[player.id] === undefined) {
+        game.scores[player.id] = 0;
+      }
+    }
+
     return game;
   }
 
   isMatchOver(roomCode) {
     const game = this.games.get(roomCode);
     if (!game) return true;
-    return game.roundNumber >= game.totalRounds;
+    return game.phase === PHASE.ROUND_OVER
+      ? game.roundNumber >= (game.totalRounds || 1)
+      : game.roundNumber > (game.totalRounds || 1);
   }
 
   /**
@@ -641,8 +686,7 @@ class GameManager {
 
   /**
    * Swap the drawn card into a hand slot.
-   * For plain cards: must be lower than the slot card's value.
-   * For action cards (banking): can go into any slot.
+   * Any card (plain or action) can replace any slot — no value restriction.
    * @returns {{ success: boolean, displaced?: object, actionTriggered?: string, error?: string }}
    */
   swapCard(roomCode, playerId, slotIndex) {
@@ -657,14 +701,7 @@ class GameManager {
     const slotCard = hand.cards[slotIndex];
     const isDrawnAction = isActionCard(drawnCard);
 
-    // Validate swap rules
-    if (!isDrawnAction) {
-      // Plain card: must be lower than slot card
-      if (drawnCard.value >= slotCard.value) {
-        return { success: false, error: 'Drawn card must be lower than the card in that slot' };
-      }
-    }
-    // Action cards can always be banked (swapped into any slot)
+    // No value restriction — any card can replace any slot (high-risk mechanic)
 
     // Perform the swap
     hand.cards[slotIndex] = drawnCard;
@@ -733,6 +770,7 @@ class GameManager {
       return { success: false, error: 'No action card drawn' };
     }
 
+    const playedCard = { ...game.drawnCard };
     const actionType = getActionType(game.drawnCard);
     game.discardPile.push(game.drawnCard);
     game.drawnCard = null;
@@ -745,7 +783,7 @@ class GameManager {
     };
 
     // The action will be resolved by the socket handler after getting target info
-    return { success: true, actionType };
+    return { success: true, actionType, card: playedCard };
   }
 
   /**
@@ -756,7 +794,6 @@ class GameManager {
     if (!game || game.phase !== PHASE.PLAYING) return null;
     const hand = game.hands[playerId];
     if (!hand) return null;
-    game.pendingAction = null;
     return hand.cards.map(c => ({ ...c }));
   }
 
@@ -768,9 +805,9 @@ class GameManager {
     const game = this.games.get(roomCode);
     if (!game || game.phase !== PHASE.PLAYING) return null;
     if (targetPlayerId === playerId) return null;
+    if (!game.playerOrder.includes(targetPlayerId)) return null;
     const targetHand = game.hands[targetPlayerId];
     if (!targetHand) return null;
-    game.pendingAction = null;
     return targetHand.cards.map(c => ({ ...c }));
   }
 
@@ -781,6 +818,7 @@ class GameManager {
     const game = this.games.get(roomCode);
     if (!game || game.phase !== PHASE.PLAYING) return false;
     if (targetPlayerId === playerId) return false;
+    if (!game.playerOrder.includes(targetPlayerId)) return false;
 
     const myHand = game.hands[playerId];
     const targetHand = game.hands[targetPlayerId];
@@ -792,7 +830,6 @@ class GameManager {
     myHand.cards[mySlot] = targetHand.cards[targetSlot];
     targetHand.cards[targetSlot] = temp;
 
-    game.pendingAction = null;
     return true;
   }
 
@@ -803,6 +840,7 @@ class GameManager {
     const game = this.games.get(roomCode);
     if (!game || game.phase !== PHASE.PLAYING) return false;
     if (targetPlayerId === playerId) return false;
+    if (!game.playerOrder.includes(targetPlayerId)) return false;
 
     const targetHand = game.hands[targetPlayerId];
     if (!targetHand) return false;
@@ -814,7 +852,6 @@ class GameManager {
       [cards[i], cards[j]] = [cards[j], cards[i]];
     }
 
-    game.pendingAction = null;
     return true;
   }
 
@@ -838,6 +875,8 @@ class GameManager {
 
     const view = {
       phase: game.phase,
+      peeksDoneCount: game.peeksDone ? game.peeksDone.size : 0,
+      totalPeeksNeeded: game.playerOrder ? game.playerOrder.length : 0,
       drawPileCount: game.drawPile.length,
       discardPile: game.discardPile.length > 0
         ? [{ ...game.discardPile[game.discardPile.length - 1] }]
@@ -872,6 +911,10 @@ class GameManager {
       view.drawnCard = { ...game.drawnCard };
     }
 
+    if (game.phase === PHASE.ROUND_OVER) {
+      view.roundResults = this.getRoundResults(roomCode);
+    }
+
     return view;
   }
 
@@ -897,7 +940,12 @@ class GameManager {
 
     // Sort by roundTotal ascending (lowest wins round)
     results.sort((a, b) => a.roundTotal - b.roundTotal);
-    results[0].isWinner = true;
+    if (results.length > 0) {
+      const minScore = results[0].roundTotal;
+      results.forEach(r => {
+        r.isWinner = (r.roundTotal === minScore);
+      });
+    }
 
     return {
       roundNumber: game.roundNumber,
@@ -915,12 +963,13 @@ class GameManager {
     const game = this.games.get(roomCode);
     if (!game) return;
 
-    game.currentPlayerIndex = (game.currentPlayerIndex + 1) % game.playerOrder.length;
-
-    // Check if draw pile is empty — if so, end the round
+    // Check if draw pile is empty — if so, end the round without advancing turn
     if (game.drawPile.length === 0) {
       this._endRound(roomCode);
+      return;
     }
+
+    game.currentPlayerIndex = (game.currentPlayerIndex + 1) % game.playerOrder.length;
   }
 
   /**
@@ -928,7 +977,7 @@ class GameManager {
    */
   _endRound(roomCode) {
     const game = this.games.get(roomCode);
-    if (!game) return;
+    if (!game || game.phase === PHASE.ROUND_OVER) return;
 
     if (game.turnTimer) {
       clearTimeout(game.turnTimer);
@@ -978,6 +1027,7 @@ export default GameManager;
 // server/RoomManager.js — Room lifecycle & player management
 
 import { v4 as uuidv4 } from 'uuid';
+import { randomInt } from 'crypto';
 
 class RoomManager {
   constructor() {
@@ -996,7 +1046,7 @@ class RoomManager {
     do {
       code = '';
       for (let i = 0; i < 6; i++) {
-        code += chars[Math.floor(Math.random() * chars.length)];
+        code += chars[randomInt(chars.length)];
       }
     } while (this.rooms.has(code));
     return code;
@@ -1059,10 +1109,13 @@ class RoomManager {
       isBot: false
     };
 
+    const cleanMaxPlayers = Number.isFinite(Number(maxPlayers)) ? Math.min(Math.max(Number(maxPlayers), 2), 10) : 4;
+    const cleanTotalRounds = Number.isFinite(Number(totalRounds)) ? Math.min(Math.max(Number(totalRounds), 1), 10) : 1;
+
     const room = {
       code,
-      maxPlayers: Math.min(Math.max(maxPlayers, 2), 10),
-      totalRounds: Math.min(Math.max(totalRounds || 1, 1), 10),
+      maxPlayers: cleanMaxPlayers,
+      totalRounds: cleanTotalRounds,
       players: [host],
       spectators: [],
       hostId: host.id,
@@ -1080,7 +1133,7 @@ class RoomManager {
    * Add a bot to a waiting room
    */
   addBot(code, botName) {
-    const room = this.rooms.get(code.toUpperCase());
+    const room = this.rooms.get(code?.toUpperCase());
     if (!room || room.status !== 'waiting') return null;
     if (room.players.length >= room.maxPlayers) return null;
 
@@ -1102,7 +1155,7 @@ class RoomManager {
    * Remove a bot from a waiting room
    */
   removeBot(code, botId) {
-    const room = this.rooms.get(code.toUpperCase());
+    const room = this.rooms.get(code?.toUpperCase());
     if (!room || room.status !== 'waiting') return false;
 
     const idx = room.players.findIndex(p => p.id === botId && p.isBot);
@@ -1137,7 +1190,7 @@ class RoomManager {
     if (playerId) {
       const existingPlayer = room.players.find(p => p.id === playerId);
       if (existingPlayer) {
-        if (existingPlayer.reconnectToken && reconnectToken && existingPlayer.reconnectToken !== reconnectToken) {
+        if (existingPlayer.reconnectToken && existingPlayer.reconnectToken !== reconnectToken) {
           return { success: false, error: 'Unauthorized reconnection attempt.' };
         }
         existingPlayer.socketId = socketId;
@@ -1152,7 +1205,7 @@ class RoomManager {
     // If game is in progress or room is full, join as spectator
     if (room.status === 'playing' || room.players.length >= room.maxPlayers) {
       const spectator = {
-        id: playerId || uuidv4(),
+        id: uuidv4(),  // Always generate fresh ID — never reuse client-provided playerId for spectators
         reconnectToken: uuidv4(),
         name: cleanPlayerName,
         socketId,
@@ -1170,7 +1223,7 @@ class RoomManager {
     }
 
     const player = {
-      id: playerId || uuidv4(),
+      id: uuidv4(),
       reconnectToken: uuidv4(),
       name: cleanPlayerName,
       socketId,
@@ -1181,7 +1234,7 @@ class RoomManager {
     };
 
     room.players.push(player);
-    this.socketToRoom.set(socketId, code);
+    this.socketToRoom.set(socketId, room.code);
     return { success: true, room, player, isSpectator: false };
   }
 
@@ -1192,7 +1245,7 @@ class RoomManager {
     const code = this.socketToRoom.get(socketId);
     if (!code) return null;
 
-    const room = this.rooms.get(code);
+    const room = this.rooms.get(code?.toUpperCase());
     if (!room) return null;
 
     // Check spectators
@@ -1243,7 +1296,7 @@ class RoomManager {
 
     const player = room.players.find(p => p.id === playerId);
     if (player) {
-      if (player.reconnectToken && reconnectToken && player.reconnectToken !== reconnectToken) {
+      if (player.reconnectToken && player.reconnectToken !== reconnectToken) {
         return null;
       }
       player.socketId = newSocketId;
@@ -1255,7 +1308,7 @@ class RoomManager {
 
     const spectator = room.spectators?.find(s => s.id === playerId);
     if (spectator) {
-      if (spectator.reconnectToken && reconnectToken && spectator.reconnectToken !== reconnectToken) {
+      if (spectator.reconnectToken && spectator.reconnectToken !== reconnectToken) {
         return null;
       }
       spectator.socketId = newSocketId;
@@ -1280,7 +1333,7 @@ class RoomManager {
    */
   getRoomBySocket(socketId) {
     const code = this.socketToRoom.get(socketId);
-    return code ? this.rooms.get(code) : null;
+    return code ? this.rooms.get(code?.toUpperCase()) : null;
   }
 
   /**
@@ -1342,6 +1395,8 @@ export default RoomManager;
 import { isActionCard, getActionType } from './Deck.js';
 import botEngine from './BotEngine.js';
 
+const abandonmentTimers = new Map(); // roomCode -> timeoutId
+
 /**
  * Wire up all socket events.
  * @param {import('socket.io').Server} io
@@ -1349,6 +1404,43 @@ import botEngine from './BotEngine.js';
  * @param {import('./GameManager.js').default} gameManager
  */
 export default function setupSocketHandlers(io, roomManager, gameManager) {
+  function startPeekPhase(room, gameState) {
+    botEngine.initRoom(room.code, gameState);
+
+    // Auto-mark peek done for bots and any currently disconnected human players
+    for (const p of room.players) {
+      if (p.isBot || !p.connected) {
+        gameManager.markPeekDone(room.code, p.id);
+      }
+    }
+
+    // Authoritative 10-second timer to advance peek phase even if a client hangs/drops
+    if (gameState.peekTimer) clearTimeout(gameState.peekTimer);
+    gameState.peekTimer = setTimeout(() => {
+      gameState.peekTimer = null;
+      const g = gameManager.getGame(room.code);
+      if (g && g.phase === 'peek_phase') {
+        console.log(`[Game] Authoritative peek timeout reached in room ${room.code} — auto-advancing`);
+        for (const pid of g.playerOrder) {
+          gameManager.markPeekDone(room.code, pid);
+        }
+        const startPid = gameManager.getCurrentPlayerId(room.code);
+        io.to(room.code).emit('peek-phase-complete', {
+          currentPlayerId: startPid
+        });
+
+        const startingPlayer = room.players.find(p => p.id === startPid);
+        if (startingPlayer && startingPlayer.isBot) {
+          botEngine.processBotTurn(room.code, startPid, gameManager, roomManager, io, (ioInstance, code, gmMgr) => {
+            emitTurnChange(ioInstance, code, gmMgr, roomManager);
+          });
+        } else {
+          emitTurnChange(io, room.code, gameManager, roomManager);
+        }
+      }
+    }, 10000);
+  }
+
   io.on('connection', (socket) => {
     console.log(`[Socket] Connected: ${socket.id}`);
 
@@ -1359,17 +1451,18 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
         const room = roomManager.createRoom(playerName, socket.id, maxPlayers, totalRounds);
         socket.join(room.code);
         const player = room.players[0];
-        callback({
+        callback?.({
           success: true,
           roomCode: room.code,
           playerId: player.id,
           reconnectToken: player.reconnectToken,
           totalRounds: room.totalRounds,
+          maxPlayers: room.maxPlayers,
           players: roomManager.getPlayerList(room)
         });
         console.log(`[Room] ${playerName} created room ${room.code} (max ${room.maxPlayers} players, ${room.totalRounds} rounds)`);
       } catch (err) {
-        callback({ success: false, error: err.message });
+        callback?.({ success: false, error: err.message });
       }
     });
 
@@ -1417,10 +1510,16 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
     socket.on('join-room', ({ roomCode, playerName, playerId, reconnectToken }, callback) => {
       const result = roomManager.joinRoom(roomCode, playerName, socket.id, playerId, reconnectToken);
       if (!result.success) {
-        callback({ success: false, error: result.error });
+        callback?.({ success: false, error: result.error });
         return;
       }
       socket.join(result.room.code);
+
+      if (abandonmentTimers.has(result.room.code)) {
+        clearTimeout(abandonmentTimers.get(result.room.code));
+        abandonmentTimers.delete(result.room.code);
+        console.log(`[Room] Human joined room ${result.room.code} — cancelled abandonment timer`);
+      }
 
       const game = gameManager.getGame(result.room.code);
       if (result.isReconnect && game?.turnTimer) {
@@ -1433,7 +1532,7 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
         gameView = gameManager.getPlayerView(result.room.code, result.player.id);
       }
 
-      callback({
+      callback?.({
         success: true,
         roomCode: result.room.code,
         playerId: result.player.id,
@@ -1442,6 +1541,7 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
         isSpectator: !!result.isSpectator,
         status: result.room.status,
         totalRounds: result.room.totalRounds,
+        maxPlayers: result.room.maxPlayers,
         spectatorCount: roomManager.getSpectatorCount(result.room),
         players: roomManager.getPlayerList(result.room),
         gameView
@@ -1498,6 +1598,12 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
       const { room, player, isSpectator } = result;
       socket.join(room.code);
 
+      if (abandonmentTimers.has(room.code)) {
+        clearTimeout(abandonmentTimers.get(room.code));
+        abandonmentTimers.delete(room.code);
+        console.log(`[Room] Human reconnected to room ${room.code} — cancelled abandonment timer`);
+      }
+
       const game = gameManager.getGame(room.code);
       if (game?.turnTimer) {
         clearTimeout(game.turnTimer);
@@ -1519,6 +1625,7 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
         isSpectator: !!isSpectator,
         status: room.status,
         totalRounds: room.totalRounds,
+        maxPlayers: room.maxPlayers,
         spectatorCount: roomManager.getSpectatorCount(room),
         players: roomManager.getPlayerList(room),
         gameView
@@ -1565,15 +1672,7 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
       const gameState = gameManager.startGame(room);
       room.gameState = gameState;
 
-      // Initialize bot memory
-      botEngine.initRoom(room.code, gameState);
-
-      // Auto-mark peek done for bots
-      for (const p of room.players) {
-        if (p.isBot) {
-          gameManager.markPeekDone(room.code, p.id);
-        }
-      }
+      startPeekPhase(room, gameState);
 
       // Send each human player their own cards for the peek phase
       for (const p of room.players) {
@@ -1629,14 +1728,7 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
         return;
       }
 
-      botEngine.initRoom(room.code, gameState);
-
-      // Auto-mark peek done for bots
-      for (const p of room.players) {
-        if (p.isBot) {
-          gameManager.markPeekDone(room.code, p.id);
-        }
-      }
+      startPeekPhase(room, gameState);
 
       for (const p of room.players) {
         if (!p.isBot && p.socketId) {
@@ -1675,16 +1767,53 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
       callback?.({ success: true });
     });
 
+    // ─── Request Rematch (Issue 4) ─────────────────────────────
+
+    socket.on('request-rematch', (_, callback) => {
+      const room = roomManager.getRoomBySocket(socket.id);
+      const player = roomManager.getPlayerBySocket(socket.id);
+      if (!room || !player || !player.isHost) {
+        callback?.({ success: false, error: 'Only host can request a rematch' });
+        return;
+      }
+
+      // Purge disconnected players before returning to waiting room
+      room.players = room.players.filter(p => p.connected || p.isBot);
+      room.players.forEach((p, i) => { p.seatIndex = i; });
+
+      room.status = 'waiting';
+      room.gameState = null;
+      gameManager.removeGame(room.code);
+      botEngine.clearRoom(room.code);
+
+      console.log(`[Room] Host requested rematch in room ${room.code} — returning players to waiting room`);
+
+      io.to(room.code).emit('room-rematch-started', {
+        roomCode: room.code,
+        players: roomManager.getPlayerList(room),
+        totalRounds: room.totalRounds,
+        maxPlayers: room.maxPlayers
+      });
+
+      callback?.({ success: true });
+    });
+
     // ─── Peek Phase ────────────────────────────────────────────
 
     socket.on('peek-done', () => {
       const room = roomManager.getRoomBySocket(socket.id);
       const player = roomManager.getPlayerBySocket(socket.id);
-      if (!room || !player) return;
+      if (!room || !player || player.isSpectator) return;
 
       const allDone = gameManager.markPeekDone(room.code, player.id);
 
       if (allDone) {
+        const game = gameManager.getGame(room.code);
+        if (game?.peekTimer) {
+          clearTimeout(game.peekTimer);
+          game.peekTimer = null;
+        }
+
         const startPid = gameManager.getCurrentPlayerId(room.code);
         io.to(room.code).emit('peek-phase-complete', {
           currentPlayerId: startPid
@@ -1696,6 +1825,8 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
           botEngine.processBotTurn(room.code, startPid, gameManager, roomManager, io, (ioInstance, code, gmMgr) => {
             emitTurnChange(ioInstance, code, gmMgr, roomManager);
           });
+        } else {
+          emitTurnChange(io, room.code, gameManager, roomManager);
         }
       }
     });
@@ -1707,6 +1838,10 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
       const player = roomManager.getPlayerBySocket(socket.id);
       if (!room || !player) {
         callback?.({ success: false, error: 'Not in a room' });
+        return;
+      }
+      if (player.isSpectator) {
+        callback?.({ success: false, error: 'Spectators cannot draw cards' });
         return;
       }
 
@@ -1750,7 +1885,14 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
     socket.on('swap-card', ({ slotIndex }, callback) => {
       const room = roomManager.getRoomBySocket(socket.id);
       const player = roomManager.getPlayerBySocket(socket.id);
-      if (!room || !player) return;
+      if (!room || !player) {
+        callback?.({ success: false, error: 'Not in a room' });
+        return;
+      }
+      if (player.isSpectator) {
+        callback?.({ success: false, error: 'Spectators cannot swap cards' });
+        return;
+      }
 
       const parsedSlot = parseInt(slotIndex, 10);
       if (Number.isNaN(parsedSlot) || parsedSlot < 0 || parsedSlot > 2) {
@@ -1807,7 +1949,14 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
     socket.on('discard-drawn', (_, callback) => {
       const room = roomManager.getRoomBySocket(socket.id);
       const player = roomManager.getPlayerBySocket(socket.id);
-      if (!room || !player) return;
+      if (!room || !player) {
+        callback?.({ success: false, error: 'Not in a room' });
+        return;
+      }
+      if (player.isSpectator) {
+        callback?.({ success: false, error: 'Spectators cannot discard cards' });
+        return;
+      }
 
       const game = gameManager.getGame(room.code);
       const discardedCard = game?.drawnCard ? { ...game.drawnCard } : null;
@@ -1831,19 +1980,28 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
     socket.on('play-action-immediately', (_, callback) => {
       const room = roomManager.getRoomBySocket(socket.id);
       const player = roomManager.getPlayerBySocket(socket.id);
-      if (!room || !player) return;
+      if (!room || !player) {
+        callback?.({ success: false, error: 'Not in a room' });
+        return;
+      }
+      if (player.isSpectator) {
+        callback?.({ success: false, error: 'Spectators cannot play action cards' });
+        return;
+      }
 
       const result = gameManager.playActionImmediately(room.code, player.id);
       callback?.({
         success: result.success,
         actionType: result.actionType,
+        card: result.card,
         error: result.error
       });
 
       if (result.success) {
-        socket.to(room.code).emit('player-played-action', {
+        io.to(room.code).emit('player-played-action', {
           playerId: player.id,
-          actionType: result.actionType
+          actionType: result.actionType,
+          card: result.card
         });
 
         // Start action resolution timeout (30s) to prevent stalling on open action modal
@@ -1913,6 +2071,11 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
         return;
       }
 
+      if (!targetPlayerId || !room.players.some(p => p.id === targetPlayerId)) {
+        callback?.({ success: false, error: 'Invalid target player: player not in room' });
+        return;
+      }
+
       const cards = gameManager.resolvePeekOpponent(room.code, player.id, targetPlayerId);
       if (!cards) {
         callback?.({ success: false, error: 'Failed to resolve peek opponent' });
@@ -1928,6 +2091,12 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
           byPlayerId: player.id
         });
       }
+
+      // Broadcast to room so spectators and other players see scan animation
+      io.to(room.code).emit('player-peeked-opponent', {
+        sourcePlayerId: player.id,
+        targetPlayerId
+      });
 
       gameManager.finishActionAndAdvance(room.code);
       emitTurnChange(io, room.code, gameManager, roomManager);
@@ -1954,6 +2123,11 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
       const auth = _canResolveAction(game, player.id, 'blind-trade');
       if (!auth.allowed) {
         callback?.({ success: false, error: auth.error });
+        return;
+      }
+
+      if (!targetPlayerId || !room.players.some(p => p.id === targetPlayerId)) {
+        callback?.({ success: false, error: 'Invalid target player: player not in room' });
         return;
       }
 
@@ -1992,6 +2166,11 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
       const auth = _canResolveAction(game, player.id, 'scramble');
       if (!auth.allowed) {
         callback?.({ success: false, error: auth.error });
+        return;
+      }
+
+      if (!targetPlayerId || !room.players.some(p => p.id === targetPlayerId)) {
+        callback?.({ success: false, error: 'Invalid target player: player not in room' });
         return;
       }
 
@@ -2036,6 +2215,13 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
         return;
       }
 
+      if (['peek-opponent', 'blind-trade', 'scramble'].includes(actionType)) {
+        if (!targetPlayerId || !room.players.some(p => p.id === targetPlayerId)) {
+          callback?.({ success: false, error: 'Invalid target player: player not in room' });
+          return;
+        }
+      }
+
       let success = false;
       let data = {};
 
@@ -2057,6 +2243,10 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
                 byPlayerId: player.id
               });
             }
+            io.to(room.code).emit('player-peeked-opponent', {
+              sourcePlayerId: player.id,
+              targetPlayerId
+            });
           }
           break;
         }
@@ -2109,6 +2299,30 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
       emitTurnChange(io, room.code, gameManager, roomManager);
     });
 
+    // ─── Leave Room ───────────────────────────────────────────
+
+    socket.on('leave-room', (_, callback) => {
+      const result = roomManager.handleDisconnect(socket.id);
+      if (result) {
+        socket.leave(result.roomCode || '');
+        if (result.removed && result.roomCode) {
+          gameManager.removeGame(result.roomCode);
+          botEngine.clearRoom(result.roomCode);
+          if (abandonmentTimers.has(result.roomCode)) {
+            clearTimeout(abandonmentTimers.get(result.roomCode));
+            abandonmentTimers.delete(result.roomCode);
+          }
+        } else if (result.room) {
+          io.to(result.room.code).emit('player-disconnected', {
+            playerId: result.player.id,
+            playerName: result.player.name,
+            players: roomManager.getPlayerList(result.room)
+          });
+        }
+      }
+      callback?.({ success: true });
+    });
+
     // ─── Disconnect ────────────────────────────────────────────
 
     socket.on('disconnect', () => {
@@ -2116,8 +2330,34 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
       if (result) {
         if (result.removed && result.roomCode) {
           gameManager.removeGame(result.roomCode);
+          botEngine.clearRoom(result.roomCode);
+          if (abandonmentTimers.has(result.roomCode)) {
+            clearTimeout(abandonmentTimers.get(result.roomCode));
+            abandonmentTimers.delete(result.roomCode);
+          }
           console.log(`[Room] Room ${result.roomCode} removed and game state cleared (no human players left)`);
         } else if (result.room) {
+          const hasConnectedHumans = result.room.players.some(pl => !pl.isBot && pl.connected) || (result.room.spectators && result.room.spectators.length > 0);
+          if (!hasConnectedHumans) {
+            console.log(`[Room] Last human left room ${result.room.code} during play — scheduling abandonment teardown (15s)`);
+            if (abandonmentTimers.has(result.room.code)) {
+              clearTimeout(abandonmentTimers.get(result.room.code));
+            }
+            const timer = setTimeout(() => {
+              abandonmentTimers.delete(result.room.code);
+              const r = roomManager.getRoom(result.room.code);
+              const stillNoHumans = !r?.players.some(pl => !pl.isBot && pl.connected) && (!r?.spectators || r.spectators.length === 0);
+              if (stillNoHumans) {
+                console.log(`[Room] Abandonment timeout expired for room ${result.room.code} — tearing down`);
+                gameManager.removeGame(result.room.code);
+                botEngine.clearRoom(result.room.code);
+                roomManager.deleteRoom(result.room.code);
+              }
+            }, 15000);
+            abandonmentTimers.set(result.room.code, timer);
+            return;
+          }
+
           io.to(result.room.code).emit('player-disconnected', {
             playerId: result.player.id,
             playerName: result.player.name,
@@ -2125,12 +2365,36 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
           });
           console.log(`[Socket] ${result.player.name} disconnected from room ${result.room.code}`);
 
-          // If game is active and it is currently the disconnected player's turn, trigger grace-period auto-skip
+          // If game is active, check peek phase auto-advance or turn-timer auto-skip
           const game = gameManager.getGame(result.room.code);
           if (game && result.room.status === 'playing') {
-            const currentPid = game.playerOrder[game.currentPlayerIndex];
-            if (currentPid === result.player.id && !game.turnTimer) {
-              emitTurnChange(io, result.room.code, gameManager, roomManager);
+            if (game.phase === 'peek_phase') {
+              const allDone = gameManager.markPeekDone(result.room.code, result.player.id);
+              if (allDone) {
+                if (game.peekTimer) {
+                  clearTimeout(game.peekTimer);
+                  game.peekTimer = null;
+                }
+                const startPid = gameManager.getCurrentPlayerId(result.room.code);
+                io.to(result.room.code).emit('peek-phase-complete', {
+                  currentPlayerId: startPid
+                });
+                const startingPlayer = result.room.players.find(p => p.id === startPid);
+                if (startingPlayer && startingPlayer.isBot) {
+                  botEngine.processBotTurn(result.room.code, startPid, gameManager, roomManager, io, (ioInstance, code, gmMgr) => {
+                    emitTurnChange(ioInstance, code, gmMgr, roomManager);
+                  });
+                } else {
+                  emitTurnChange(io, result.room.code, gameManager, roomManager);
+                }
+              }
+            } else {
+              const currentPid = game.playerOrder[game.currentPlayerIndex];
+              if (currentPid === result.player.id) {
+                if (game.turnTimer) clearTimeout(game.turnTimer);
+                game.turnTimer = null;
+                emitTurnChange(io, result.room.code, gameManager, roomManager);
+              }
             }
           }
         }
@@ -2189,6 +2453,15 @@ function emitTurnChange(io, roomCode, gameManager, roomManager) {
       io.to(roomCode).emit('round-over', { results });
     }
   } else {
+    const hasConnectedHumans = room?.players.some(pl => !pl.isBot && pl.connected) || (room?.spectators && room.spectators.length > 0);
+    if (!hasConnectedHumans && !abandonmentTimers.has(roomCode)) {
+      console.log(`[Game] No human players or spectators connected in room ${roomCode} — tearing down abandoned room and game`);
+      gameManager.removeGame(roomCode);
+      botEngine.clearRoom(roomCode);
+      roomManager?.deleteRoom(roomCode);
+      return;
+    }
+
     const currentPid = game.playerOrder[game.currentPlayerIndex];
     io.to(roomCode).emit('turn-change', {
       currentPlayerId: currentPid,
@@ -2228,6 +2501,7 @@ function emitTurnChange(io, roomCode, gameManager, roomManager) {
         if (!hasConnectedHumans) {
           console.log(`[Game] All human players disconnected in room ${roomCode} — tearing down abandoned room and game`);
           gameManager.removeGame(roomCode);
+          botEngine.clearRoom(roomCode); // P1: clear bot memory to prevent leak
           roomManager.deleteRoom(roomCode);
           return;
         }
@@ -2511,6 +2785,13 @@ class BotEngine {
   }
 
   /**
+   * Remove all bot memory for a room (call on room deletion to prevent memory leaks).
+   */
+  clearRoom(roomCode) {
+    this.botMemories.delete(roomCode);
+  }
+
+  /**
    * Main turn processor for a bot
    */
   async processBotTurn(roomCode, botId, gameManager, roomManager, io, emitTurnChange) {
@@ -2523,12 +2804,16 @@ class BotEngine {
     await new Promise(res => setTimeout(res, 1200 + Math.random() * 1000));
 
     // Check again after delay
-    if (game.phase !== 'playing' || gameManager.getCurrentPlayerId(roomCode) !== botId) return;
+    const activeGame = gameManager.getGame(roomCode);
+    const activeRoom = roomManager.getRoom(roomCode);
+    if (!activeGame || !activeRoom || activeGame.phase !== 'playing') return;
+    if (gameManager.getCurrentPlayerId(roomCode) !== botId) return;
 
     // 1. Draw Card
     const drawResult = gameManager.drawCard(roomCode, botId);
     if (!drawResult) {
-      if (game.phase === 'round_over') {
+      if (activeGame.phase === 'round_over' && !activeGame.roundOverEmitted) {
+        activeGame.roundOverEmitted = true;
         const results = gameManager.getRoundResults(roomCode);
         io.to(roomCode).emit('round-over', { results });
       }
@@ -2544,6 +2829,11 @@ class BotEngine {
 
     // Thinking delay after drawing
     await new Promise(res => setTimeout(res, 1000 + Math.random() * 800));
+
+    const postDrawGame = gameManager.getGame(roomCode);
+    const postDrawRoom = roomManager.getRoom(roomCode);
+    if (!postDrawGame || !postDrawRoom || postDrawGame.phase !== 'playing') return;
+    if (gameManager.getCurrentPlayerId(roomCode) !== botId) return;
 
     // 2. Decide action
     const mem = this.getMemory(roomCode, botId);
@@ -2595,12 +2885,12 @@ class BotEngine {
           });
           await this._resolveBotAction(swapRes.actionTriggered, roomCode, botId, gameManager, roomManager, io, emitTurnChange);
         } else {
-          emitTurnChange(io, roomCode, gameManager);
+          emitTurnChange(io, roomCode, gameManager, roomManager);
         }
       } else {
         gameManager.discardDrawn(roomCode, botId);
         io.to(roomCode).emit('player-discarded', { playerId: botId, card: drawnCard });
-        emitTurnChange(io, roomCode, gameManager);
+        emitTurnChange(io, roomCode, gameManager, roomManager);
       }
     } else {
       // Plain card: find slot where drawn card is lower than memory of slot card
@@ -2642,18 +2932,18 @@ class BotEngine {
             });
             await this._resolveBotAction(swapRes.actionTriggered, roomCode, botId, gameManager, roomManager, io, emitTurnChange);
           } else {
-            emitTurnChange(io, roomCode, gameManager);
+            emitTurnChange(io, roomCode, gameManager, roomManager);
           }
         } else {
           gameManager.discardDrawn(roomCode, botId);
           io.to(roomCode).emit('player-discarded', { playerId: botId, card: drawnCard });
-          emitTurnChange(io, roomCode, gameManager);
+          emitTurnChange(io, roomCode, gameManager, roomManager);
         }
       } else {
         // Discard
         gameManager.discardDrawn(roomCode, botId);
         io.to(roomCode).emit('player-discarded', { playerId: botId, card: drawnCard });
-        emitTurnChange(io, roomCode, gameManager);
+        emitTurnChange(io, roomCode, gameManager, roomManager);
       }
     }
   }
@@ -2690,11 +2980,15 @@ class BotEngine {
   }
 
   async _resolveBotAction(actionType, roomCode, botId, gameManager, roomManager, io, emitTurnChange) {
-    const game = gameManager.getGame(roomCode);
-    const room = roomManager.getRoom(roomCode);
-    if (!game || !room) return;
+    let game = gameManager.getGame(roomCode);
+    let room = roomManager.getRoom(roomCode);
+    if (!game || !room || game.phase !== 'playing') return;
 
     await new Promise(res => setTimeout(res, 600));
+
+    game = gameManager.getGame(roomCode);
+    room = roomManager.getRoom(roomCode);
+    if (!game || !room || game.phase !== 'playing') return;
 
     switch (actionType) {
       case 'peek-own': {
@@ -2721,6 +3015,10 @@ class BotEngine {
               byPlayerId: botId
             });
           }
+          io.to(roomCode).emit('player-peeked-opponent', {
+            sourcePlayerId: botId,
+            targetPlayerId: targetOpponent
+          });
         }
         break;
       }
@@ -2790,11 +3088,12 @@ class BotEngine {
     }
 
     gameManager.finishActionAndAdvance(roomCode);
-    emitTurnChange(io, roomCode, gameManager);
+    emitTurnChange(io, roomCode, gameManager, roomManager);
   }
 }
 
 const botEngine = new BotEngine();
+export { BotEngine };
 export default botEngine;
 ```
 
@@ -2808,9 +3107,10 @@ export default botEngine;
 import socketClient from './game/SocketClient.js';
 import clientState from './game/ClientState.js';
 import { renderLobbyScreen } from './screens/LobbyScreen.js';
-import { renderWaitingRoom } from './screens/WaitingRoom.js';
-import { renderGameScreen } from './screens/GameScreen.js';
+import { renderWaitingRoom, cleanupWaitingListeners } from './screens/WaitingRoom.js';
+import { renderGameScreen, cleanupListeners } from './screens/GameScreen.js';
 import { renderResultsScreen } from './screens/ResultsScreen.js';
+import { renderHowToPlayScreen } from './screens/HowToPlayScreen.js';
 import { showToast } from './components/Toast.js';
 
 // ─── Router ────────────────────────────────────────────
@@ -2818,7 +3118,8 @@ const screens = {
   lobby: renderLobbyScreen,
   waiting: renderWaitingRoom,
   game: renderGameScreen,
-  results: renderResultsScreen
+  results: renderResultsScreen,
+  'how-to-play': renderHowToPlayScreen
 };
 
 function navigate(screen) {
@@ -2849,14 +3150,30 @@ socketClient.on('_error', (err) => {
 // These need to be registered once, not per-screen
 
 socketClient.on('game-started', (data) => {
+  cleanupWaitingListeners(); // P2: remove waiting room listeners before entering game
   clientState.startGame(data);
   navigate('game');
 });
 
+socketClient.on('room-rematch-started', (data) => {
+  cleanupWaitingListeners();
+  cleanupListeners();
+  clientState.resetForRematch(data);
+  navigate('waiting');
+  showToast('Rematch started! Back in waiting room...', { type: 'info', icon: '🔄' });
+});
+
 // ─── Reconnection on Boot ──────────────────────────────
 const savedSession = clientState.getSavedSession();
+const urlParams = new URLSearchParams(window.location.search);
+const urlCode = urlParams.get('code');
 
-if (savedSession) {
+// If user explicitly followed an invite link for a different room, discard stale session
+if (urlCode && savedSession && savedSession.roomCode && savedSession.roomCode.toUpperCase() !== urlCode.toUpperCase()) {
+  clientState.clearSession();
+  clientState.reset();
+  navigate('lobby');
+} else if (savedSession) {
   let attempted = false;
   const attemptReconnect = () => {
     if (attempted) return;
@@ -2876,10 +3193,14 @@ if (savedSession) {
           res.isSpectator,
           res.totalRounds,
           res.gameView,
-          res.reconnectToken || savedSession.reconnectToken
+          res.reconnectToken || savedSession.reconnectToken,
+          res.maxPlayers  // P2: propagate maxPlayers so waiting room shows correct capacity
         );
 
-        if (res.status === 'playing') {
+        if (res.gameView && res.gameView.phase === 'round_over') {
+          clientState.setRoundResults(res.gameView.roundResults);
+          navigate('results');
+        } else if (res.status === 'playing') {
           navigate('game');
         } else {
           navigate('waiting');
@@ -2887,6 +3208,7 @@ if (savedSession) {
         showToast('Reconnected to game!', { type: 'success', icon: '🔌' });
       } else {
         clientState.clearSession();
+        clientState.reset(); // P3: clear stale game state (phase, myCards etc) on reconnect failure
         navigate('lobby');
       }
     });
@@ -2921,7 +3243,6 @@ console.log('🃏 MIND F*CK loaded');
 class ClientState {
   constructor() {
     this.reset();
-    this._listeners = new Map();
   }
 
   reset() {
@@ -2946,6 +3267,8 @@ class ClientState {
     this.discardPile = [];
     this.drawnCard = null;
     this.roundNumber = 1;
+    this.peeksDoneCount = 0;
+    this.totalPeeksNeeded = 0;
     this.scores = {};
     this.isMatchOver = false;
 
@@ -2957,39 +3280,16 @@ class ClientState {
     this.peekTimerSeconds = 0;
   }
 
-  /**
-   * Subscribe to state changes.
-   */
-  on(event, handler) {
-    if (!this._listeners.has(event)) {
-      this._listeners.set(event, new Set());
-    }
-    this._listeners.get(event).add(handler);
-  }
-
-  off(event, handler) {
-    const handlers = this._listeners.get(event);
-    if (handlers) handlers.delete(handler);
-  }
-
-  _emit(event, data) {
-    const handlers = this._listeners.get(event);
-    if (handlers) {
-      handlers.forEach(h => {
-        try { h(data); } catch (e) { console.error(e); }
-      });
-    }
-  }
-
   // ─── Mutations ──────────────────────────────────────
 
-  setRoom(roomCode, playerId, players, isHost = false, isSpectator = false, totalRounds = 1, reconnectToken = null) {
+  setRoom(roomCode, playerId, players, isHost = false, isSpectator = false, totalRounds = 1, reconnectToken = null, maxPlayers = 4) {
     this.roomCode = roomCode;
     this.playerId = playerId;
     this.isHost = isHost;
     this.isSpectator = isSpectator;
     this.players = players || [];
     this.totalRounds = totalRounds || 1;
+    this.maxPlayers = maxPlayers || 4;
 
     const me = this.players.find(p => p.id === playerId);
     if (me) {
@@ -3000,22 +3300,23 @@ class ClientState {
     if (!isSpectator) {
       this.saveSession(roomCode, playerId, reconnectToken);
     }
-    this._emit('stateChange', { type: 'room-set' });
   }
 
-  resumeGame(roomCode, playerId, players, isHost = false, isSpectator = false, totalRounds = 1, gameView = null, reconnectToken = null) {
+  resumeGame(roomCode, playerId, players, isHost = false, isSpectator = false, totalRounds = 1, gameView = null, reconnectToken = null, maxPlayers = 4) {
     this.roomCode = roomCode;
     this.playerId = playerId;
     this.players = players || [];
     this.isHost = isHost;
     this.isSpectator = isSpectator;
     this.totalRounds = totalRounds || 1;
+    this.maxPlayers = maxPlayers || 4;
 
     const me = this.players.find(p => p.id === playerId);
     if (me) {
       this.playerName = me.name;
     }
 
+    // Save session once with the provided token (P1: removed duplicate call below)
     if (!isSpectator && reconnectToken) {
       this.saveSession(roomCode, playerId, reconnectToken);
     }
@@ -3027,6 +3328,8 @@ class ClientState {
       this.currentPlayerId = gameView.currentPlayerId;
       this.playerOrder = gameView.playerOrder || [];
       this.roundNumber = gameView.roundNumber || 1;
+      this.peeksDoneCount = gameView.peeksDoneCount || 0;
+      this.totalPeeksNeeded = gameView.totalPeeksNeeded || 0;
       this.scores = gameView.scores || {};
       this.myCards = gameView.myHand || [];
       this.knownCards = (gameView.myHand || []).map(c => (c ? { ...c } : null));
@@ -3035,12 +3338,6 @@ class ClientState {
     } else {
       this.screen = isSpectator ? 'game' : 'waiting';
     }
-
-    if (!isSpectator) {
-      this.saveSession(roomCode, playerId);
-    }
-
-    this._emit('stateChange', { type: 'game-resumed' });
   }
 
   updatePlayers(players) {
@@ -3048,7 +3345,6 @@ class ClientState {
     // Check if we're still host
     const me = players.find(p => p.id === this.playerId);
     if (me) this.isHost = me.isHost;
-    this._emit('stateChange', { type: 'players-updated' });
   }
 
   startGame(data) {
@@ -3061,83 +3357,85 @@ class ClientState {
     this.currentPlayerId = data.currentPlayerId;
     this.roundNumber = data.roundNumber || 1;
     this.totalRounds = data.totalRounds || this.totalRounds || 1;
+    this.discardPile = [];
+    this.drawnCard = null;
+    this.pendingAction = null;
+    this.roundResults = null;
     if (data.isSpectator !== undefined) this.isSpectator = data.isSpectator;
     if (data.scores) this.scores = { ...data.scores };
     this.screen = 'game';
-    this._emit('stateChange', { type: 'game-started' });
   }
 
   setPeekComplete(currentPlayerId) {
     this.phase = 'playing';
     this.currentPlayerId = currentPlayerId;
     this.peekCards = null;
-    this._emit('stateChange', { type: 'peek-complete' });
   }
 
   setDrawnCard(card) {
     this.drawnCard = card;
-    this._emit('stateChange', { type: 'card-drawn' });
   }
 
   clearDrawnCard() {
     this.drawnCard = null;
-    this._emit('stateChange', { type: 'drawn-card-cleared' });
   }
 
   updateTurn(currentPlayerId, drawPileCount) {
     this.currentPlayerId = currentPlayerId;
     if (drawPileCount !== undefined) this.drawPileCount = drawPileCount;
     this.drawnCard = null;
-    this._emit('stateChange', { type: 'turn-changed' });
   }
 
   updateDrawPile(count) {
     this.drawPileCount = count;
-    this._emit('stateChange', { type: 'draw-pile-updated' });
   }
 
   addToDiscard(card) {
     this.discardPile.push(card);
-    this._emit('stateChange', { type: 'discard-updated' });
+    if (this.discardPile.length > 5) {
+      this.discardPile = this.discardPile.slice(-5);
+    }
   }
 
   updateKnownCard(slotIndex, card) {
     this.knownCards[slotIndex] = card ? { ...card } : null;
-    this._emit('stateChange', { type: 'known-card-updated' });
   }
 
   setAllKnownCards(cards) {
     this.knownCards = (cards || []).map(c => c ? { ...c } : null);
-    this._emit('stateChange', { type: 'all-cards-peeked' });
+    this.myCards = (cards || []).map(c => c ? { ...c } : null);
   }
 
   // After a swap, we know the drawn card is now in the slot
   recordSwap(slotIndex, newCard) {
     this.knownCards[slotIndex] = { ...newCard };
+    // Keep myCards in sync so the peek-my-cards overlay shows accurate current hand
+    if (this.myCards[slotIndex] !== undefined) {
+      this.myCards[slotIndex] = { ...newCard };
+    }
     this.drawnCard = null;
-    this._emit('stateChange', { type: 'swap-recorded' });
   }
 
   // After a blind trade, we no longer know what's in that slot
   recordBlindTrade(mySlot) {
     this.knownCards[mySlot] = null; // Unknown now
-    this._emit('stateChange', { type: 'trade-recorded' });
+    if (this.myCards && this.myCards[mySlot] !== undefined) {
+      this.myCards[mySlot] = null;
+    }
   }
 
   // After a scramble on us, all positions are unknown
   recordScramble() {
     this.knownCards = [null, null, null];
-    this._emit('stateChange', { type: 'scramble-recorded' });
+    this.myCards = [null, null, null];
   }
 
   setPendingAction(action) {
     this.pendingAction = action;
-    this._emit('stateChange', { type: 'pending-action' });
   }
 
   clearPendingAction() {
     this.pendingAction = null;
-    this._emit('stateChange', { type: 'action-cleared' });
   }
 
   setRoundResults(data) {
@@ -3158,8 +3456,38 @@ class ClientState {
     if (this.isMatchOver) {
       this.clearSession();
     }
+  }
 
-    this._emit('stateChange', { type: 'round-over' });
+  resetForRematch(data) {
+    this.phase = null;
+    this.myCards = [];
+    this.knownCards = [null, null, null];
+    this.playerOrder = [];
+    this.currentPlayerId = null;
+    this.drawPileCount = 0;
+    this.discardPile = [];
+    this.drawnCard = null;
+    this.roundNumber = 1;
+    this.peeksDoneCount = 0;
+    this.totalPeeksNeeded = 0;
+    this.scores = {};
+    this.isMatchOver = false;
+    this.roundResults = null;
+    this.pendingAction = null;
+    this.peekCards = null;
+    this.peekTimerSeconds = 0;
+    this.screen = 'waiting';
+
+    if (data?.roomCode) this.roomCode = data.roomCode;
+    if (data?.players) this.players = data.players;
+    if (data?.totalRounds) this.totalRounds = data.totalRounds;
+    if (data?.maxPlayers) this.maxPlayers = data.maxPlayers;
+
+    const me = this.players.find(p => p.id === this.playerId);
+    if (me) {
+      this.isHost = !!me.isHost;
+      this.playerName = me.name;
+    }
   }
 
   /**
@@ -3271,6 +3599,11 @@ class SocketClient {
       console.error('[Socket] Connection error:', err.message);
       this._emit('_error', err);
     });
+
+    this.socket.on('error', (err) => {
+      console.error('[Socket] Socket error:', err?.message || err);
+      this._emit('_error', err);
+    });
   }
 
   /**
@@ -3369,7 +3702,7 @@ class SoundEngine {
       }
     }
     if (this.ctx && this.ctx.state === 'suspended') {
-      this.ctx.resume();
+      this.ctx.resume().catch(() => {});
     }
   }
 
@@ -3698,13 +4031,7 @@ export function getActionType(card) {
   }
 }
 
-export function canSwapPlain(drawnCard, slotCard) {
-  if (!drawnCard || !slotCard) return true;
-  if (isActionCard(drawnCard)) return true; // Action cards can bank anywhere
-  const drawnVal = drawnCard.value !== undefined ? drawnCard.value : getCardValue(drawnCard);
-  const slotVal = slotCard.value !== undefined ? slotCard.value : getCardValue(slotCard);
-  return drawnVal < slotVal;
-}
+
 
 export function formatCard(card) {
   return `${card.rank}${getSuitSymbol(card.suit)}`;
@@ -3800,7 +4127,7 @@ class CardAnimationEngine {
 
     // Trigger flip during flight if faceUp is requested
     if (faceUp) {
-      setTimeout(() => {
+      this._setTimeout(() => {
         flyer.classList.add('flipped');
       }, duration * 0.3);
     }
@@ -3813,7 +4140,7 @@ class CardAnimationEngine {
       flyer.style.transform = `translate(-50%, -50%) scale(1.05) rotate(${(Math.random() - 0.5) * 15}deg)`;
     });
 
-    setTimeout(() => {
+    this._setTimeout(() => {
       flyer.remove();
       onComplete?.();
     }, duration + 30);
@@ -3891,7 +4218,7 @@ class CardAnimationEngine {
     badge.className = `slot-action-badge badge-${type}`;
     badge.textContent = text;
     targetEl.appendChild(badge);
-    setTimeout(() => badge.remove(), 1900);
+    this._setTimeout(() => badge.remove(), 1900);
   }
 
   /**
@@ -3909,7 +4236,7 @@ class CardAnimationEngine {
       slotEl.classList.add('slot-card-replaced');
       const slotLabel = ['#1 Left', '#2 Mid', '#3 Right'][slotIndex] || `#${(slotIndex ?? 0) + 1}`;
       this._spawnSlotBadge(slotEl, `🔄 SWAP ${slotLabel}`, 'swap');
-      setTimeout(() => {
+      this._setTimeout(() => {
         slotEl.classList.remove('slot-card-replaced');
       }, 1400);
     }
@@ -3992,9 +4319,9 @@ class CardAnimationEngine {
 
     const details = {
       'peek-own': `${sourceName} is peeking at their own cards`,
-      'peek-opponent': `${sourceName} is peeking at all of ${targetName}'s cards`,
-      'blind-trade': `${sourceName} traded ${sSlot} with ${targetName}'s ${tSlot}`,
-      'scramble': `${sourceName} scrambled all of ${targetName}'s cards!`
+      'peek-opponent': targetName ? `${sourceName} is peeking at all of ${targetName}'s cards` : `${sourceName} is choosing an opponent to peek`,
+      'blind-trade': targetName ? `${sourceName} traded ${sSlot} with ${targetName}'s ${tSlot}` : `${sourceName} is initiating a Blind Trade`,
+      'scramble': targetName ? `${sourceName} scrambled all of ${targetName}'s cards!` : `${sourceName} is choosing an opponent to scramble`
     };
 
     const titleEl = document.createElement('div');
@@ -4010,9 +4337,9 @@ class CardAnimationEngine {
 
     layer.appendChild(banner);
 
-    setTimeout(() => {
+    this._setTimeout(() => {
       banner.classList.add('banner-exit');
-      setTimeout(() => banner.remove(), 400);
+      this._setTimeout(() => banner.remove(), 400);
     }, 2400);
   }
 
@@ -4021,7 +4348,7 @@ class CardAnimationEngine {
     halo.className = 'king-royal-halo';
     seatEl.appendChild(halo);
 
-    setTimeout(() => {
+    this._setTimeout(() => {
       halo.remove();
     }, 2500);
   }
@@ -4050,10 +4377,10 @@ class CardAnimationEngine {
     const targetFan = targetEl.querySelector('.card-fan');
     if (targetFan) {
       targetFan.classList.add('queen-targeted-fan');
-      setTimeout(() => targetFan.classList.remove('queen-targeted-fan'), 2000);
+      this._setTimeout(() => targetFan.classList.remove('queen-targeted-fan'), 2000);
     }
 
-    setTimeout(() => beam.remove(), 1600);
+    this._setTimeout(() => beam.remove(), 1600);
   }
 
   _renderJackTrade(sourcePlayerId, targetPlayerId, sourceSlot = null, targetSlot = null) {
@@ -4076,13 +4403,13 @@ class CardAnimationEngine {
     if (sourceEl.classList.contains('card')) {
       sourceEl.classList.add('slot-card-traded');
       this._spawnSlotBadge(sourceEl, `🔄 GIVING ${sLabel}`, 'trade');
-      setTimeout(() => sourceEl.classList.remove('slot-card-traded'), 1600);
+      this._setTimeout(() => sourceEl.classList.remove('slot-card-traded'), 1600);
     }
 
     if (targetEl.classList.contains('card')) {
       targetEl.classList.add('slot-card-traded');
       this._spawnSlotBadge(targetEl, `🔄 GETTING ${tLabel}`, 'trade');
-      setTimeout(() => targetEl.classList.remove('slot-card-traded'), 1600);
+      this._setTimeout(() => targetEl.classList.remove('slot-card-traded'), 1600);
     }
 
     // Two card spirits flying in arcing paths directly between the two specific card slots
@@ -4110,7 +4437,7 @@ class CardAnimationEngine {
       card2.style.top = `${sRect.top + sRect.height / 2}px`;
     });
 
-    setTimeout(() => {
+    this._setTimeout(() => {
       card1.remove();
       card2.remove();
     }, 900);
@@ -4129,7 +4456,7 @@ class CardAnimationEngine {
       vortex.className = 'scramble-vortex';
       fan.appendChild(vortex);
 
-      setTimeout(() => {
+      this._setTimeout(() => {
         fan.classList.remove('card-scrambling-wild');
         vortex.remove();
       }, 1500);
@@ -4194,6 +4521,14 @@ export function renderLobbyScreen(navigate) {
   subtitle.textContent = 'The strategic memory card game';
   screen.appendChild(subtitle);
 
+  const htpLink = document.createElement('button');
+  htpLink.className = 'btn btn-ghost btn-sm';
+  htpLink.id = 'how-to-play-btn';
+  htpLink.style.cssText = 'margin-top: var(--space-sm); font-size: var(--fs-sm); color: var(--text-muted); border: 1px solid var(--glass-border); letter-spacing: 0.02em;';
+  htpLink.textContent = '📖 How to Play';
+  htpLink.addEventListener('click', () => navigate('how-to-play'));
+  screen.appendChild(htpLink);
+
   // Form container
   const form = document.createElement('div');
   form.className = 'lobby-form glass-card anim-fade-in-up';
@@ -4209,6 +4544,11 @@ export function renderLobbyScreen(navigate) {
   nameInput.placeholder = 'Enter your display name';
   nameInput.maxLength = 20;
   nameInput.value = localStorage.getItem('undercut_name') || '';
+  nameInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      document.getElementById('create-game-btn')?.click();
+    }
+  });
   form.appendChild(nameLabel);
   form.appendChild(nameInput);
 
@@ -4338,6 +4678,8 @@ export function renderLobbyScreen(navigate) {
       return;
     }
 
+    clientState.clearSession();
+    clientState.reset();
     localStorage.setItem('undercut_name', name);
     clientState.playerName = name;
     clientState.maxPlayers = maxPlayers;
@@ -4351,7 +4693,7 @@ export function renderLobbyScreen(navigate) {
       createBtn.textContent = '🎲 Create Game';
 
       if (res.success) {
-        clientState.setRoom(res.roomCode, res.playerId, res.players, true, false, res.totalRounds || totalRounds, res.reconnectToken);
+        clientState.setRoom(res.roomCode, res.playerId, res.players, true, false, res.totalRounds || totalRounds, res.reconnectToken, res.maxPlayers);
         navigate('waiting');
       } else {
         showToast(res.error || 'Failed to create game', { type: 'error' });
@@ -4395,6 +4737,12 @@ export function renderLobbyScreen(navigate) {
     let val = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
     if (val.length > 6) val = val.substring(0, 6);
     codeInput.value = val;
+  });
+
+  codeInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      document.getElementById('join-game-btn')?.click();
+    }
   });
 
   // 1-Tap Paste Button (especially handy for mobile/touch)
@@ -4473,9 +4821,9 @@ export function renderLobbyScreen(navigate) {
 
       if (res.success) {
         if (res.gameView) {
-          clientState.resumeGame(res.roomCode, res.playerId, res.players, res.isHost, res.isSpectator, res.totalRounds, res.gameView, res.reconnectToken || savedToken);
+          clientState.resumeGame(res.roomCode, res.playerId, res.players, res.isHost, res.isSpectator, res.totalRounds, res.gameView, res.reconnectToken || savedToken, res.maxPlayers);
         } else {
-          clientState.setRoom(res.roomCode, res.playerId, res.players, res.isHost || false, res.isSpectator, res.totalRounds, res.reconnectToken || savedToken);
+          clientState.setRoom(res.roomCode, res.playerId, res.players, res.isHost || false, res.isSpectator, res.totalRounds, res.reconnectToken || savedToken, res.maxPlayers);
         }
         if (res.isSpectator) {
           showToast(`Joined as spectator (${res.spectatorCount || 1} watching)`, { type: 'info', icon: '👁️' });
@@ -4520,6 +4868,7 @@ import socketClient from '../game/SocketClient.js';
 import { showToast } from '../components/Toast.js';
 
 let waitingListeners = [];
+let currentNavigate = null;
 
 function cleanupWaitingListeners() {
   waitingListeners.forEach(({ event, handler }) => {
@@ -4527,6 +4876,8 @@ function cleanupWaitingListeners() {
   });
   waitingListeners = [];
 }
+
+export { cleanupWaitingListeners };
 
 function onSocket(event, handler) {
   socketClient.on(event, handler);
@@ -4539,6 +4890,7 @@ function onSocket(event, handler) {
  */
 export function renderWaitingRoom(navigate) {
   cleanupWaitingListeners(); // Remove old listeners before re-registering
+  currentNavigate = navigate;
   const app = document.getElementById('app');
   app.innerHTML = '';
 
@@ -4677,6 +5029,8 @@ export function renderWaitingRoom(navigate) {
   backBtn.textContent = '← Leave Room';
   backBtn.style.marginTop = 'var(--space-md)';
   backBtn.addEventListener('click', () => {
+    cleanupWaitingListeners();
+    socketClient.emit('leave-room', null, () => {});
     clientState.clearSession();
     clientState.reset();
     navigate('lobby');
@@ -4751,7 +5105,11 @@ function renderPlayerCards(container) {
       removeBtn.title = 'Remove bot';
       removeBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        socketClient.emit('remove-bot', { botId: player.id });
+        socketClient.emit('remove-bot', { botId: player.id }, (res) => {
+          if (!res?.success) {
+            showToast(res?.error || 'Could not remove bot', { type: 'warning' });
+          }
+        });
       });
       card.appendChild(removeBtn);
     }
@@ -4780,6 +5138,12 @@ function renderPlayerCards(container) {
 }
 
 function updateWaitingRoom() {
+  // If host status transferred to this player and host controls are missing, re-render
+  if (clientState.isHost && !document.getElementById('start-game-btn') && currentNavigate) {
+    renderWaitingRoom(currentNavigate);
+    return;
+  }
+
   const grid = document.getElementById('players-grid');
   if (grid) renderPlayerCards(grid);
 
@@ -4813,22 +5177,33 @@ import clientState from '../game/ClientState.js';
 import socketClient from '../game/SocketClient.js';
 import soundEngine from '../game/SoundEngine.js';
 import cardAnimationEngine from '../game/CardAnimationEngine.js';
-import { createTable, updateTableCenter, updateSeatHighlights } from '../components/Table.js';
+import { createTable, updateTableCenter } from '../components/Table.js';
 import { createDrawnCardPanel, removeDrawnCardPanel } from '../components/DrawnCardPanel.js';
-import { showActionModal, hideModal } from '../components/ActionModal.js';
+import { showActionModal, hideModal, queueAfterInspection } from '../components/ActionModal.js';
 import { showToast } from '../components/Toast.js';
 import { createCard } from '../components/Card.js';
 import { isActionCard, getActionType } from '../game/CardUtils.js';
 
 let currentNavigate = null;
 let registeredListeners = []; // Track all registered socket listeners for cleanup
+let peekCountdown = null;     // P1: module-level so cleanupListeners can always cancel it
+let isActionPending = false;  // Debounce in-flight user actions
 
 function cleanupListeners() {
+  isActionPending = false;
   registeredListeners.forEach(({ event, handler }) => {
     socketClient.off(event, handler);
   });
   registeredListeners = [];
+  // Cancel peek timer if it's still running (e.g. round-over fires during peek phase)
+  if (peekCountdown) {
+    clearInterval(peekCountdown);
+    peekCountdown = null;
+  }
+  cardAnimationEngine.clearAnimations();
 }
+
+export { cleanupListeners };
 
 function onSocket(event, handler) {
   socketClient.on(event, handler);
@@ -4846,11 +5221,12 @@ export function renderGameScreen(navigate) {
   app.innerHTML = '';
 
   // Clear any stale animation elements (UX-7)
+  cardAnimationEngine.clearAnimations();
   const animLayer = document.getElementById('card-animation-layer');
   if (animLayer) animLayer.innerHTML = '';
 
   // HUD
-  const hud = createHUD();
+  const hud = createHUD(navigate);
   app.appendChild(hud);
 
   // If we're in peek phase (and not a spectator), show the peek overlay
@@ -4871,7 +5247,7 @@ export function renderGameScreen(navigate) {
   setupGameListeners(navigate);
 }
 
-function createHUD() {
+function createHUD(navigate) {
   const hud = document.createElement('div');
   hud.className = 'game-hud';
 
@@ -4881,6 +5257,17 @@ function createHUD() {
   roomCode.className = 'hud-room-code';
   roomCode.textContent = `ROOM: ${clientState.roomCode}`;
   left.appendChild(roomCode);
+
+  // Leave Game button
+  if (!clientState.isSpectator) {
+    const leaveBtn = document.createElement('button');
+    leaveBtn.className = 'btn btn-ghost btn-sm hud-leave-btn';
+    leaveBtn.id = 'leave-game-btn';
+    leaveBtn.title = 'Leave game';
+    leaveBtn.innerHTML = '🚪 <span class="hud-leave-label">Leave</span>';
+    leaveBtn.addEventListener('click', () => showLeaveConfirmModal(navigate || currentNavigate));
+    left.appendChild(leaveBtn);
+  }
 
   if (clientState.isSpectator) {
     const specBadge = document.createElement('span');
@@ -4975,12 +5362,13 @@ function renderPeekPhase(app) {
     socketClient.emit('peek-done');
     doneBtn.disabled = true;
     doneBtn.textContent = 'Waiting for others...';
-    clearInterval(countdown);
+    clearInterval(peekCountdown);
+    peekCountdown = null;
   };
 
   doneBtn.addEventListener('click', finishPeek);
 
-  const countdown = setInterval(() => {
+  peekCountdown = setInterval(() => {
     seconds--;
     const timerEl = document.getElementById('peek-phase-timer');
     if (timerEl) timerEl.textContent = seconds;
@@ -5036,11 +5424,14 @@ function handleDraw() {
     ensureDrawnCardPanel(clientState.drawnCard);
     highlightDrawnCardPanel();
     const rankStr = clientState.drawnCard.rank || 'a card';
-    showToast(`Holding ${rankStr}. Pick a higher slot to swap, or click Discard to pass.`, { type: 'info', icon: '🃏' });
+    showToast(`Already holding ${rankStr}. Pick a slot to swap, or click Discard.`, { type: 'info', icon: '🃏' });
     return;
   }
+  if (isActionPending) return;
+  isActionPending = true;
 
   socketClient.emit('draw-card', null, (res) => {
+    isActionPending = false;
     if (res.roundOver) {
       return;
     }
@@ -5064,23 +5455,15 @@ function handleDraw() {
 }
 
 function handleSwap(slotIndex) {
+  if (isActionPending) return;
+  isActionPending = true;
   soundEngine.click();
   socketClient.emit('swap-card', { slotIndex }, (res) => {
+    isActionPending = false;
     if (!res.success) {
-      const drawn = clientState.drawnCard;
-      const rankStr = drawn ? drawn.rank : 'this card';
-      showToast(res.error || `Cannot swap: drawn ${rankStr} is not lower than that slot. Pick a higher slot or click Discard.`, { type: 'warning', icon: '⚠️' });
+      showToast(res.error || 'Swap failed. Please try again.', { type: 'warning', icon: '⚠️' });
       ensureDrawnCardPanel(clientState.drawnCard);
       highlightDrawnCardPanel();
-
-      // Wobble/shake the clicked slot card in the player's hand
-      const slotEl = document.querySelector(`.seat-me .card[data-slot-index="${slotIndex}"]`);
-      if (slotEl) {
-        slotEl.classList.remove('shake-error');
-        void slotEl.offsetWidth;
-        slotEl.classList.add('shake-error');
-        setTimeout(() => slotEl.classList.remove('shake-error'), 600);
-      }
       return;
     }
 
@@ -5115,8 +5498,14 @@ function handleSwap(slotIndex) {
 }
 
 function handleDiscard() {
+  if (isActionPending) return;
+  isActionPending = true;
   soundEngine.click();
+  // P2: Capture synchronously BEFORE the async emit — prevents stale read if
+  // 'player-discarded' arrives before the acknowledgement callback fires.
+  const discardedCard = clientState.drawnCard;
   socketClient.emit('discard-drawn', null, (res) => {
+    isActionPending = false;
     if (!res.success) {
       showToast(res.error || 'Discard failed', { type: 'error' });
       ensureDrawnCardPanel(clientState.drawnCard);
@@ -5125,7 +5514,6 @@ function handleDiscard() {
 
     removeDrawnCardPanel();
 
-    const discardedCard = clientState.drawnCard;
     if (discardedCard) {
       cardAnimationEngine.animateDiscard({
         playerId: clientState.playerId,
@@ -5139,8 +5527,12 @@ function handleDiscard() {
 }
 
 function handlePlayAction() {
+  if (isActionPending) return;
+  isActionPending = true;
   soundEngine.click();
+  const playedCard = clientState.drawnCard ? { ...clientState.drawnCard } : null;
   socketClient.emit('play-action-immediately', null, (res) => {
+    isActionPending = false;
     if (!res.success) {
       showToast(res.error || 'Failed to play action', { type: 'error' });
       ensureDrawnCardPanel(clientState.drawnCard);
@@ -5148,6 +5540,18 @@ function handlePlayAction() {
     }
 
     removeDrawnCardPanel();
+
+    const cardToDiscard = res.card || playedCard;
+    if (cardToDiscard) {
+      cardAnimationEngine.animateDiscard({
+        playerId: clientState.playerId,
+        card: cardToDiscard,
+        onComplete: () => {
+          clientState.addToDiscard(cardToDiscard);
+          updateTableCenter(handleDraw);
+        }
+      });
+    }
 
     cardAnimationEngine.triggerActionFX({
       actionType: res.actionType,
@@ -5207,6 +5611,14 @@ function setupGameListeners(navigate) {
   onSocket('turn-change', (data) => {
     clientState.updateTurn(data.currentPlayerId, data.drawPileCount);
     removeDrawnCardPanel();
+    // Do not hide modal if player is actively viewing a peek inspection (King / Queen)
+    const overlay = document.getElementById('modal-overlay');
+    const isInspectingPeek = overlay && overlay.classList.contains('active') &&
+      (overlay.querySelector('#peek-timer') || overlay.querySelector('.peek-cards'));
+    const isLeaveModal = overlay && overlay.querySelector('.leave-confirm-modal');
+    if (!isInspectingPeek && !isLeaveModal) {
+      hideModal();
+    }
     refreshTable();
     if (clientState.isMyTurn && !clientState.isSpectator) {
       soundEngine.turnNotify();
@@ -5285,19 +5697,40 @@ function setupGameListeners(navigate) {
 
   // Another player played an action
   onSocket('player-played-action', (data) => {
+    if (data.card && data.playerId !== clientState.playerId) {
+      cardAnimationEngine.animateDiscard({
+        playerId: data.playerId,
+        card: data.card,
+        onComplete: () => {
+          clientState.addToDiscard(data.card);
+          updateTableCenter(handleDraw);
+        }
+      });
+    }
     cardAnimationEngine.triggerActionFX({
       actionType: data.actionType,
       sourcePlayerId: data.playerId
     });
   });
 
-  // You were peeked at (Queen) — BUG-6: removed stale slotIndex
-  onSocket('you-were-peeked', (data) => {
+  // Target peeked by Queen (broadcast to whole room)
+  onSocket('player-peeked-opponent', (data) => {
     cardAnimationEngine.triggerActionFX({
       actionType: 'peek-opponent',
-      sourcePlayerId: data.byPlayerId,
-      targetPlayerId: clientState.playerId
+      sourcePlayerId: data.sourcePlayerId,
+      targetPlayerId: data.targetPlayerId
     });
+  });
+
+  // You were peeked at (Queen) - direct target event fallback
+  onSocket('you-were-peeked', (data) => {
+    if (!document.querySelector('.queen-scan-beam')) {
+      cardAnimationEngine.triggerActionFX({
+        actionType: 'peek-opponent',
+        sourcePlayerId: data.byPlayerId,
+        targetPlayerId: clientState.playerId
+      });
+    }
   });
 
   // Blind trade complete
@@ -5359,10 +5792,14 @@ function setupGameListeners(navigate) {
 
   // Round over
   onSocket('round-over', (data) => {
+    cleanupListeners();
     clientState.setRoundResults(data.results);
     removeDrawnCardPanel();
-    hideModal();
-    navigate('results');
+
+    queueAfterInspection(() => {
+      hideModal();
+      navigate('results');
+    });
   });
 
   // Player disconnect
@@ -5382,6 +5819,85 @@ function setupGameListeners(navigate) {
   });
 }
 
+/**
+ * Show a confirmation dialog before leaving the game.
+ * Uses the existing #modal-overlay system.
+ */
+function showLeaveConfirmModal(navigate) {
+  soundEngine.click();
+
+  const overlay = document.getElementById('modal-overlay');
+  overlay.innerHTML = '';
+
+  const modal = document.createElement('div');
+  modal.className = 'action-modal leave-confirm-modal';
+
+  const icon = document.createElement('div');
+  icon.className = 'leave-confirm-icon';
+  icon.textContent = '🚪';
+
+  const title = document.createElement('div');
+  title.className = 'leave-confirm-title';
+  title.textContent = 'Leave the game?';
+
+  const body = document.createElement('p');
+  body.className = 'leave-confirm-body';
+  body.textContent = 'Your seat will be lost. Your turns will be auto-skipped until the round concludes.';
+
+  const warning = document.createElement('div');
+  warning.className = 'leave-confirm-warning';
+  warning.innerHTML = '⚠️ This cannot be undone. You will return to the lobby.';
+
+  const btnRow = document.createElement('div');
+  btnRow.className = 'leave-confirm-btns';
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'btn btn-secondary btn-lg';
+  cancelBtn.id = 'leave-cancel-btn';
+  cancelBtn.textContent = '↩ Stay';
+  cancelBtn.addEventListener('click', () => {
+    overlay.classList.remove('active');
+    overlay.innerHTML = '';
+  });
+
+  const confirmBtn = document.createElement('button');
+  confirmBtn.className = 'btn leave-confirm-danger btn-lg';
+  confirmBtn.id = 'leave-confirm-btn';
+  confirmBtn.textContent = 'Leave Game';
+  confirmBtn.addEventListener('click', () => {
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = 'Leaving...';
+
+    // Clean up and navigate to lobby
+    cleanupListeners();
+    removeDrawnCardPanel();
+    clientState.clearSession();
+    clientState.reset();
+    socketClient.disconnect();
+
+    overlay.classList.remove('active');
+    overlay.innerHTML = '';
+
+    // Small delay so the socket disconnect registers
+    setTimeout(() => {
+      socketClient.connect(); // reconnect for next game
+      navigate('lobby');
+    }, 250);
+  });
+
+  btnRow.appendChild(cancelBtn);
+  btnRow.appendChild(confirmBtn);
+
+  modal.appendChild(icon);
+  modal.appendChild(title);
+  modal.appendChild(body);
+  modal.appendChild(warning);
+  modal.appendChild(btnRow);
+
+  overlay.appendChild(modal);
+  overlay.classList.add('active');
+}
+
 export default { renderGameScreen };
 
 ```
@@ -5398,6 +5914,7 @@ import socketClient from '../game/SocketClient.js';
 import soundEngine from '../game/SoundEngine.js';
 import { createCard } from '../components/Card.js';
 import { formatCard } from '../game/CardUtils.js';
+import { cleanupListeners } from './GameScreen.js';
 
 /**
  * Render the results screen.
@@ -5416,15 +5933,30 @@ export function renderResultsScreen(navigate) {
     return;
   }
 
-  const results = Array.isArray(data) ? data : (data.playerResults || []);
   const isMatchOver = data.isMatchOver !== undefined ? data.isMatchOver : true;
   const isMultiRound = clientState.totalRounds > 1;
 
-  const roundWinner = results[0];
-  const isWinnerMe = roundWinner && roundWinner.playerId === clientState.playerId;
+  const rawResults = Array.isArray(data) ? data : (data.playerResults || []);
+  const results = [...rawResults].sort((a, b) => {
+    if (isMatchOver && isMultiRound) {
+      return (a.cumulativeScore ?? 0) - (b.cumulativeScore ?? 0);
+    }
+    return (a.roundTotal ?? a.total ?? 0) - (b.roundTotal ?? b.total ?? 0);
+  });
+
+  const minRoundTotal = rawResults.length > 0
+    ? Math.min(...rawResults.map(r => r.roundTotal ?? r.total ?? 0))
+    : 0;
+  const roundWinners = rawResults.filter(r => (r.roundTotal ?? r.total ?? 0) === minRoundTotal);
+  const isWinnerMe = roundWinners.some(w => w.playerId === clientState.playerId);
+
+  // Find overall match winner (lowest cumulative score)
+  const minCumScore = results.length > 0 ? Math.min(...results.map(r => r.cumulativeScore ?? 0)) : 0;
+  const matchWinners = results.filter(w => (w.cumulativeScore ?? 0) === minCumScore);
+  const isMatchWinnerMe = matchWinners.some(w => w.playerId === clientState.playerId);
 
   // Play sound
-  if (isWinnerMe) {
+  if ((isMultiRound && isMatchOver) ? isMatchWinnerMe : isWinnerMe) {
     soundEngine.roundWin();
   } else {
     soundEngine.roundLose();
@@ -5434,21 +5966,22 @@ export function renderResultsScreen(navigate) {
   const title = document.createElement('h1');
   title.className = 'results-title';
   if (isMultiRound && isMatchOver) {
-    // Find overall match winner (lowest cumulative score)
-    const sortedOverall = [...results].sort((a, b) => a.cumulativeScore - b.cumulativeScore);
-    const matchWinner = sortedOverall[0];
-    const isMatchWinnerMe = matchWinner.playerId === clientState.playerId;
-
     if (isMatchWinnerMe) {
-      title.innerHTML = '<span class="shimmer-text">👑 MATCH CHAMPION! YOU WIN!</span>';
+      title.innerHTML = matchWinners.length > 1
+        ? '<span class="shimmer-text">👑 TIED MATCH CHAMPIONS! YOU WIN!</span>'
+        : '<span class="shimmer-text">👑 MATCH CHAMPION! YOU WIN!</span>';
     } else {
-      title.textContent = `👑 ${clientState.getPlayerName(matchWinner.playerId)} Wins the Match!`;
+      const winnerNames = matchWinners.map(w => clientState.getPlayerName(w.playerId)).join(' & ');
+      title.textContent = `👑 ${winnerNames} Wins the Match!`;
       title.style.color = 'var(--gold)';
     }
   } else if (isWinnerMe) {
-    title.innerHTML = '<span class="shimmer-text">🏆 You Win The Round!</span>';
+    title.innerHTML = roundWinners.length > 1
+      ? '<span class="shimmer-text">🏆 You Tied for the Round Win!</span>'
+      : '<span class="shimmer-text">🏆 You Win The Round!</span>';
   } else {
-    title.textContent = `🏆 ${clientState.getPlayerName(roundWinner.playerId)} Wins Round ${clientState.roundNumber}!`;
+    const winnerNames = roundWinners.map(w => clientState.getPlayerName(w.playerId)).join(' & ');
+    title.textContent = `🏆 ${winnerNames} Wins Round ${clientState.roundNumber}!`;
     title.style.color = 'var(--text-primary)';
   }
   screen.appendChild(title);
@@ -5489,11 +6022,22 @@ export function renderResultsScreen(navigate) {
 
   results.forEach((result, index) => {
     const tr = document.createElement('tr');
-    if (result.isWinner) tr.className = 'winner';
+    const isChampion = isMatchOver && isMultiRound && (result.cumulativeScore ?? 0) === minCumScore;
+    const isRoundWinner = (!isMatchOver || !isMultiRound) && (result.isWinner || (result.roundTotal ?? result.total ?? 0) === minRoundTotal);
+    const isWinner = isChampion || isRoundWinner;
+    if (isWinner) tr.className = 'winner';
     tr.style.animation = `fadeInUp 0.5s var(--ease-out) ${index * 150}ms both`;
 
     const rankTd = document.createElement('td');
-    rankTd.textContent = result.isWinner ? '🥇' : `${index + 1}`;
+    if (isChampion) {
+      rankTd.textContent = '👑';
+      rankTd.title = 'Champion';
+    } else if (isRoundWinner) {
+      rankTd.textContent = '🥇';
+      rankTd.title = 'Round Winner';
+    } else {
+      rankTd.textContent = `${index + 1}`;
+    }
     rankTd.style.fontSize = 'var(--fs-lg)';
 
     const nameTd = document.createElement('td');
@@ -5505,6 +6049,13 @@ export function renderResultsScreen(navigate) {
       youBadge.className = 'you-badge';
       youBadge.textContent = 'YOU';
       nameTd.appendChild(youBadge);
+    }
+    if (isChampion) {
+      const champBadge = document.createElement('span');
+      champBadge.className = 'you-badge';
+      champBadge.style.cssText = 'background: hsla(43, 85%, 55%, 0.2); color: var(--gold); border-color: var(--gold); margin-left: 6px;';
+      champBadge.textContent = '👑 Champion';
+      nameTd.appendChild(champBadge);
     }
 
     const cardsTd = document.createElement('td');
@@ -5582,46 +6133,21 @@ export function renderResultsScreen(navigate) {
       playAgainBtn.textContent = '🔄 Play Again';
       playAgainBtn.addEventListener('click', () => {
         playAgainBtn.disabled = true;
-        playAgainBtn.textContent = 'Creating Room...';
+        playAgainBtn.textContent = 'Requesting Rematch...';
         soundEngine.cardShuffle();
-
-        const savedName = clientState.playerName || localStorage.getItem('undercut_name') || 'Player';
-        const savedMaxPlayers = clientState.maxPlayers || 4;
-        const savedTotalRounds = clientState.totalRounds || 1;
-
-        clientState.clearSession();
-        clientState.reset();
-
-        const createNew = () => {
-          socketClient.emit('create-room', {
-            playerName: savedName,
-            maxPlayers: savedMaxPlayers,
-            totalRounds: savedTotalRounds
-          }, (res) => {
-            if (res && res.success) {
-              clientState.setRoom(res.roomCode, res.playerId, res.players, true, false, res.totalRounds);
-              navigate('waiting');
-            } else {
-              navigate('lobby');
-            }
-          });
-        };
-
-        if (socketClient.connected) {
-          createNew();
-        } else {
-          socketClient.connect();
-          const onConnect = () => {
-            socketClient.off('_connected', onConnect);
-            createNew();
-          };
-          socketClient.on('_connected', onConnect);
-          setTimeout(() => {
-            if (!clientState.roomCode) navigate('lobby');
-          }, 4000);
-        }
+        socketClient.emit('request-rematch', null, (res) => {
+          if (!res?.success) {
+            playAgainBtn.disabled = false;
+            playAgainBtn.textContent = '🔄 Play Again';
+          }
+        });
       });
       actions.appendChild(playAgainBtn);
+    } else {
+      const waitNotice = document.createElement('div');
+      waitNotice.style.cssText = 'color:var(--text-muted);font-size:var(--fs-sm);align-self:center;';
+      waitNotice.textContent = 'Waiting for host to start rematch...';
+      actions.appendChild(waitNotice);
     }
   }
 
@@ -5630,6 +6156,8 @@ export function renderResultsScreen(navigate) {
   backBtn.textContent = '🏠 Back to Lobby';
   backBtn.addEventListener('click', () => {
     soundEngine.click();
+    cleanupListeners();
+    socketClient.emit('leave-room', null, () => {});
     clientState.clearSession();
     clientState.reset();
     navigate('lobby');
@@ -5641,6 +6169,409 @@ export function renderResultsScreen(navigate) {
 }
 
 export default { renderResultsScreen };
+```
+
+---
+
+### `src/screens/HowToPlayScreen.js`
+
+```javascript
+// src/screens/HowToPlayScreen.js — Animated, engaging rules guide
+
+/**
+ * Render the How to Play screen.
+ * @param {Function} navigate - (screen) => void
+ */
+export function renderHowToPlayScreen(navigate) {
+  const app = document.getElementById('app');
+  app.innerHTML = '';
+
+  const screen = document.createElement('div');
+  screen.className = 'htp-screen';
+
+  // ── Floating background particles ──────────────────────
+  const particles = document.createElement('div');
+  particles.className = 'lobby-bg-particles';
+  const suits = ['♠', '♥', '♦', '♣'];
+  for (let i = 0; i < 16; i++) {
+    const p = document.createElement('div');
+    p.className = 'particle';
+    p.textContent = suits[i % 4];
+    p.style.left = `${Math.random() * 100}%`;
+    p.style.top = `${Math.random() * 100}%`;
+    p.style.fontSize = `${1 + Math.random() * 1.5}rem`;
+    p.style.setProperty('--dx', `${(Math.random() - 0.5) * 150}px`);
+    p.style.setProperty('--dy', `${-80 - Math.random() * 200}px`);
+    p.style.setProperty('--dr', `${Math.random() * 360}deg`);
+    p.style.animationDelay = `${Math.random() * 12}s`;
+    p.style.animationDuration = `${14 + Math.random() * 8}s`;
+    p.style.opacity = '0.12';
+    particles.appendChild(p);
+  }
+  screen.appendChild(particles);
+
+  // ── Sticky back button ──────────────────────────────────
+  const backBar = document.createElement('div');
+  backBar.className = 'htp-back-bar';
+  const backBtn = document.createElement('button');
+  backBtn.className = 'btn btn-ghost btn-sm htp-back-btn';
+  backBtn.id = 'htp-back-btn';
+  backBtn.textContent = '← Back to Lobby';
+  backBtn.addEventListener('click', () => navigate('lobby'));
+  backBar.appendChild(backBtn);
+  screen.appendChild(backBar);
+
+  // ── Content wrapper ─────────────────────────────────────
+  const content = document.createElement('div');
+  content.className = 'htp-content';
+
+  // ── Hero ────────────────────────────────────────────────
+  const hero = document.createElement('div');
+  hero.className = 'htp-hero anim-fade-in-up';
+
+  const heroTitle = document.createElement('h1');
+  heroTitle.className = 'htp-hero-title shimmer-text';
+  heroTitle.textContent = 'How to Play';
+
+  const heroSub = document.createElement('p');
+  heroSub.className = 'htp-hero-sub';
+  heroSub.innerHTML = 'Learn <strong>MIND F*CK</strong> in 2 minutes — the strategic memory card game where the lowest hand wins.';
+
+  hero.appendChild(heroTitle);
+  hero.appendChild(heroSub);
+  content.appendChild(hero);
+
+  // ── Sections ────────────────────────────────────────────
+  const sections = buildSections();
+  sections.forEach(s => content.appendChild(s));
+
+  // ── Play button at bottom ───────────────────────────────
+  const cta = document.createElement('div');
+  cta.className = 'htp-cta';
+  const playBtn = document.createElement('button');
+  playBtn.className = 'btn btn-primary btn-lg';
+  playBtn.id = 'htp-play-btn';
+  playBtn.textContent = "🎲 I'm Ready — Let's Play!";
+  playBtn.addEventListener('click', () => navigate('lobby'));
+  cta.appendChild(playBtn);
+  content.appendChild(cta);
+
+  screen.appendChild(content);
+  app.appendChild(screen);
+
+  // Animate sections into view on scroll
+  initScrollAnimations();
+}
+
+// ─── Section builders ──────────────────────────────────────
+
+function buildSections() {
+  return [
+    buildObjectiveSection(),
+    buildSetupSection(),
+    buildTurnSection(),
+    buildActionCardsSection(),
+    buildCardValuesSection(),
+    buildEndSection(),
+    buildTipsSection(),
+  ];
+}
+
+function makeSection(id, icon, title, colorVar) {
+  const sec = document.createElement('section');
+  sec.className = 'htp-section htp-reveal';
+  sec.id = id;
+
+  const header = document.createElement('div');
+  header.className = 'htp-section-header';
+  header.style.setProperty('--accent', colorVar);
+
+  const iconEl = document.createElement('div');
+  iconEl.className = 'htp-section-icon';
+  iconEl.textContent = icon;
+  iconEl.style.background = `hsla(${colorVar}, 0.12)`;
+  iconEl.style.border = `1px solid hsla(${colorVar}, 0.3)`;
+
+  const titleEl = document.createElement('h2');
+  titleEl.className = 'htp-section-title';
+  titleEl.textContent = title;
+
+  header.appendChild(iconEl);
+  header.appendChild(titleEl);
+  sec.appendChild(header);
+
+  return sec;
+}
+
+function makeCard(content) {
+  const card = document.createElement('div');
+  card.className = 'htp-card glass-card';
+  card.innerHTML = content;
+  return card;
+}
+
+function makeStepList(steps) {
+  const ol = document.createElement('ol');
+  ol.className = 'htp-steps';
+  steps.forEach(step => {
+    const li = document.createElement('li');
+    li.className = 'htp-step';
+    li.innerHTML = step;
+    ol.appendChild(li);
+  });
+  return ol;
+}
+
+function buildObjectiveSection() {
+  const sec = makeSection('htp-objective', '🏆', 'The Goal', '43, 85%, 55%');
+
+  const card = makeCard(`
+    <p class="htp-lead">Each player holds <strong>3 cards face-down</strong>. At the end of the round, everyone reveals them.</p>
+    <div class="htp-highlight-box">
+      <span class="htp-highlight-icon">🥇</span>
+      <div>
+        <strong>Lowest total wins the round.</strong>
+        <span class="htp-muted"> That's it. The catch? You can only look at your cards <em>once</em> at the very start — then you're playing from memory.</span>
+      </div>
+    </div>
+  `);
+  sec.appendChild(card);
+  return sec;
+}
+
+function buildSetupSection() {
+  const sec = makeSection('htp-setup', '🃏', 'Setup', '210, 80%, 58%');
+
+  sec.appendChild(makeStepList([
+    '3 cards are dealt <strong>face-down</strong> to each player.',
+    'You get <strong>8 seconds</strong> to peek at your 3 cards and memorize them.',
+    'The cards go face-down and <strong>stay face-down</strong>. No peeking again — unless you play a King.',
+    'The remaining deck becomes the <strong>Draw Pile</strong>.',
+    'Turns rotate clockwise. The round ends when the Draw Pile runs dry.',
+  ]));
+
+  const tip = document.createElement('div');
+  tip.className = 'htp-callout htp-callout--warning';
+  tip.innerHTML = `<span>⚡</span> <span><strong>Memory is everything.</strong> If you forget which slot holds which card, you're flying blind. That's the game.</span>`;
+  sec.appendChild(tip);
+
+  return sec;
+}
+
+function buildTurnSection() {
+  const sec = makeSection('htp-turn', '🔄', 'Your Turn', '145, 65%, 42%');
+
+  const intro = document.createElement('p');
+  intro.className = 'htp-body';
+  intro.innerHTML = 'On your turn, draw the top card from the Draw Pile. You have two choices based on what you drew:';
+  sec.appendChild(intro);
+
+  const grid = document.createElement('div');
+  grid.className = 'htp-turn-grid';
+
+  // Plain card choice
+  const plain = document.createElement('div');
+  plain.className = 'htp-turn-card glass-card';
+  plain.innerHTML = `
+    <div class="htp-turn-card-header" style="color: hsl(145, 65%, 55%)">
+      <span>🂡</span> Drew a Plain Card
+    </div>
+    <p>Compare it to your <em>memory</em> of your 3 slots.</p>
+    <ul class="htp-list">
+      <li><strong>Swap it</strong> into any slot — even a risky one. The card you replace gets discarded.</li>
+      <li><strong>Discard it</strong> and keep your hand exactly as it is.</li>
+    </ul>
+    <div class="htp-turn-warning">⚠️ You're swapping blind — you might upgrade or accidentally wreck a good slot!</div>
+  `;
+
+  // Action card choice
+  const action = document.createElement('div');
+  action.className = 'htp-turn-card glass-card';
+  action.innerHTML = `
+    <div class="htp-turn-card-header" style="color: hsl(43, 85%, 65%)">
+      <span>⚡</span> Drew an Action Card
+    </div>
+    <p>Action cards (7, J, Q, K) give you a superpower. Choose:</p>
+    <ul class="htp-list">
+      <li><strong>Play it now</strong> — use the power immediately, then discard it.</li>
+      <li><strong>Bank it</strong> — swap it into any slot to save its power for later. This can remove a high card from your hand!</li>
+    </ul>
+    <div class="htp-turn-note">💡 Banked action cards can be triggered later when another card replaces them.</div>
+  `;
+
+  grid.appendChild(plain);
+  grid.appendChild(action);
+  sec.appendChild(grid);
+
+  return sec;
+}
+
+function buildActionCardsSection() {
+  const sec = makeSection('htp-actions', '⚡', 'Action Cards', '38, 92%, 55%');
+
+  const intro = document.createElement('p');
+  intro.className = 'htp-body';
+  intro.innerHTML = 'Four special cards change everything. Play them for an instant effect or bank them to hold their power.';
+  sec.appendChild(intro);
+
+  // NOTE: colors are stored as raw "H, S%, L%" component strings (matching
+  // the pattern used by makeSection/colorVar elsewhere in this file), not as
+  // full `hsl(...)` strings. That's what lets us build both a solid color
+  // and a translucent border/background from the same value with hsla().
+  const actions = [
+    {
+      rank: 'K', name: 'King — Peek Own', hsl: '43, 85%, 55%',
+      desc: 'Secretly look at all 3 of your own cards. The <strong>only</strong> way to re-check your hand during the game.',
+      badge: 'K', tip: 'Use it when you\'ve genuinely forgotten what\'s in a slot. Muscle memory wins.',
+    },
+    {
+      rank: 'Q', name: 'Queen — Peek Opponent', hsl: '280, 70%, 65%',
+      desc: 'Secretly look at all 3 cards of any opponent. You know their hand \u2014 they don\'t know you know.',
+      badge: 'Q', tip: 'Best played when you\'re close to winning and need to compare.',
+    },
+    {
+      rank: 'J', name: 'Jack — Blind Trade', hsl: '210, 80%, 58%',
+      desc: 'Swap one of your card slots with one of an opponent\'s. <em>Neither player looks at either card.</em> Pure chaos.',
+      badge: 'J', tip: 'Target the opponent who seems most confident \u2014 they probably have a low card. Trade your worst slot.',
+    },
+    {
+      rank: '7', name: 'Seven — Scramble', hsl: '0, 72%, 52%',
+      desc: 'Randomly rearrange all 3 of an opponent\'s card positions without looking. Everything they memorized becomes useless.',
+      badge: '7', tip: 'Devastating on a player who just used a King. They memorized... and now it\'s all wrong.',
+    },
+  ];
+
+  const grid = document.createElement('div');
+  grid.className = 'htp-action-grid';
+
+  actions.forEach(a => {
+    const solid = `hsl(${a.hsl})`;
+    const border = `hsla(${a.hsl}, 0.4)`;
+    const card = document.createElement('div');
+    card.className = 'htp-action-card glass-card';
+    card.innerHTML = `
+      <div class="htp-action-rank" style="color: ${solid}; border-color: ${border};">${a.badge}</div>
+      <div class="htp-action-name" style="color: ${solid}">${a.name}</div>
+      <p class="htp-action-desc">${a.desc}</p>
+      <div class="htp-action-tip">💡 ${a.tip}</div>
+    `;
+    grid.appendChild(card);
+  });
+
+  sec.appendChild(grid);
+  return sec;
+}
+
+function buildCardValuesSection() {
+  const sec = makeSection('htp-values', '🎴', 'Card Values', '145, 50%, 35%');
+
+  const intro = document.createElement('p');
+  intro.className = 'htp-body';
+  intro.innerHTML = 'At round end, everyone reveals their hand. Cards count at face value:';
+  sec.appendChild(intro);
+
+  const tableWrap = document.createElement('div');
+  tableWrap.className = 'htp-table-wrap';
+
+  const table = document.createElement('table');
+  table.className = 'htp-table';
+  table.innerHTML = `
+    <thead>
+      <tr><th>Card</th><th>Value</th><th>Type</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Ace</td><td class="htp-val">1</td><td class="htp-type">Plain</td></tr>
+      <tr><td>2 – 6</td><td class="htp-val">2 – 6</td><td class="htp-type">Plain</td></tr>
+      <tr class="htp-action-row"><td>7</td><td class="htp-val">7</td><td class="htp-type htp-badge-action">⚡ Scramble</td></tr>
+      <tr><td>8, 9, 10</td><td class="htp-val">8 – 10</td><td class="htp-type">Plain</td></tr>
+      <tr class="htp-action-row"><td>Jack</td><td class="htp-val">11</td><td class="htp-type htp-badge-action">⚡ Blind Trade</td></tr>
+      <tr class="htp-action-row"><td>Queen</td><td class="htp-val">12</td><td class="htp-type htp-badge-action">⚡ Peek Opponent</td></tr>
+      <tr class="htp-action-row"><td>King</td><td class="htp-val">13</td><td class="htp-type htp-badge-action">⚡ Peek Own</td></tr>
+    </tbody>
+  `;
+  tableWrap.appendChild(table);
+  sec.appendChild(tableWrap);
+
+  const callout = document.createElement('div');
+  callout.className = 'htp-callout htp-callout--info';
+  callout.innerHTML = `<span>🧠</span> <span>An unplayed Action card is still worth its full face value at round end. A banked King = 13 points in your hand if never triggered. Use it or lose (points) with it.</span>`;
+  sec.appendChild(callout);
+
+  return sec;
+}
+
+function buildEndSection() {
+  const sec = makeSection('htp-end', '🏁', 'Ending the Round', '0, 72%, 52%');
+
+  const card = makeCard(`
+    <div class="htp-end-grid">
+      <div class="htp-end-item">
+        <div class="htp-end-icon">🃏</div>
+        <strong>Draw Pile Empty</strong>
+        <p>The round ends immediately when no cards remain to draw.</p>
+      </div>
+      <div class="htp-end-item">
+        <div class="htp-end-icon">👁️</div>
+        <strong>Reveal All</strong>
+        <p>Everyone flips their 3 cards face-up. No hiding now.</p>
+      </div>
+      <div class="htp-end-item">
+        <div class="htp-end-icon">➕</div>
+        <strong>Add Up</strong>
+        <p>Sum your 3 card values. Aces count as 1.</p>
+      </div>
+      <div class="htp-end-item" style="border-color: hsla(43, 85%, 55%, 0.3); background: hsla(43,85%,55%,0.06)">
+        <div class="htp-end-icon">🥇</div>
+        <strong style="color: hsl(43,85%,65%)">Lowest Wins!</strong>
+        <p>The player with the smallest total takes the round.</p>
+      </div>
+    </div>
+  `);
+  sec.appendChild(card);
+  return sec;
+}
+
+function buildTipsSection() {
+  const sec = makeSection('htp-tips', '🧠', 'Pro Tips', '280, 70%, 65%');
+
+  const tips = [
+    { icon: '🎯', text: '<strong>Prioritize your slots mentally.</strong> Think of them as Left / Middle / Right. Repeat their values in your head after each swap.' },
+    { icon: '🔄', text: '<strong>The Blind Trade is a weapon.</strong> Target the player who just peeked their own hand — they know exactly what they have, so scramble their confidence.' },
+    { icon: '💀', text: '<strong>Discard is always safe.</strong> If you drew high and don\'t want to risk your hand, just discard it. No shame in passing.' },
+    { icon: '👑', text: '<strong>Bank the King, not play it.</strong> A banked King removes a potentially high card from your hand AND saves the peek power for when you forget.' },
+    { icon: '🎲', text: '<strong>Late game = chaos.</strong> When the draw pile is almost gone, aggressive swaps and trades can flip the outcome entirely.' },
+  ];
+
+  const list = document.createElement('div');
+  list.className = 'htp-tips-list';
+
+  tips.forEach((tip, i) => {
+    const item = document.createElement('div');
+    item.className = 'htp-tip-item glass-card htp-reveal';
+    item.style.animationDelay = `${i * 0.08}s`;
+    item.innerHTML = `<span class="htp-tip-icon">${tip.icon}</span><span>${tip.text}</span>`;
+    list.appendChild(item);
+  });
+
+  sec.appendChild(list);
+  return sec;
+}
+
+// ── Scroll-reveal animations ────────────────────────────────
+function initScrollAnimations() {
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        entry.target.classList.add('htp-revealed');
+        observer.unobserve(entry.target);
+      }
+    });
+  }, { threshold: 0.1, rootMargin: '0px 0px -40px 0px' });
+
+  document.querySelectorAll('.htp-reveal').forEach(el => observer.observe(el));
+}
+
+export default { renderHowToPlayScreen };
 ```
 
 ---
@@ -5809,11 +6740,17 @@ export function createSeat(player, angle, isCurrentTurn, onCardClick = null) {
     for (let i = 0; i < 3; i++) {
       const cardEl = createCardBack({ interactive: canInteract });
       cardEl.dataset.slotIndex = i;
+      cardEl.title = `Slot #${i + 1}`;
       if (canInteract && onCardClick) {
         cardEl.style.cursor = 'pointer';
         cardEl.classList.add('card-swappable');
         cardEl.addEventListener('click', () => onCardClick(i));
       }
+      const slotBadge = document.createElement('div');
+      slotBadge.className = 'card-slot-badge';
+      slotBadge.textContent = `#${i + 1}`;
+      cardEl.appendChild(slotBadge);
+
       cardFan.appendChild(cardEl);
     }
   } else {
@@ -5821,6 +6758,13 @@ export function createSeat(player, angle, isCurrentTurn, onCardClick = null) {
     for (let i = 0; i < 3; i++) {
       const cardEl = createCardBack();
       cardEl.dataset.slotIndex = i;
+      cardEl.title = `Slot #${i + 1}`;
+
+      const slotBadge = document.createElement('div');
+      slotBadge.className = 'card-slot-badge';
+      slotBadge.textContent = `#${i + 1}`;
+      cardEl.appendChild(slotBadge);
+
       cardFan.appendChild(cardEl);
     }
   }
@@ -6129,8 +7073,9 @@ export default { createDiscardPile };
 // src/components/DrawnCardPanel.js — Floating panel for drawn card decisions
 
 import { createCard } from './Card.js';
-import { isActionCard, getActionName, canSwapPlain } from '../game/CardUtils.js';
-import clientState from '../game/ClientState.js';
+import { isActionCard, getActionName } from '../game/CardUtils.js';
+
+let panelRemoveTimeout = null;
 
 /**
  * Create the drawn card decision panel.
@@ -6141,6 +7086,15 @@ import clientState from '../game/ClientState.js';
  * @param {Function} onBankAction - (slotIndex) => void (only for action cards)
  */
 export function createDrawnCardPanel(card, { onSwap, onDiscard, onPlayAction, onBankAction }) {
+  if (panelRemoveTimeout) {
+    clearTimeout(panelRemoveTimeout);
+    panelRemoveTimeout = null;
+  }
+  const existing = document.getElementById('drawn-card-panel');
+  if (existing) {
+    existing.remove();
+  }
+
   const panel = document.createElement('div');
   panel.className = 'drawn-card-panel';
   panel.id = 'drawn-card-panel';
@@ -6181,45 +7135,24 @@ export function createDrawnCardPanel(card, { onSwap, onDiscard, onPlayAction, on
     }
     actions.appendChild(slotBtns);
   } else {
-    // Plain card: show swap options with valid indicators
+    // Plain card: show swap options — player plays blind, no card value hints
     const swapLabel = document.createElement('div');
     swapLabel.style.cssText = 'font-size:0.75rem;color:var(--text-secondary);font-weight:600;';
-    swapLabel.textContent = 'Swap with a HIGHER slot:';
+    swapLabel.textContent = 'Swap with any slot:';
     actions.appendChild(swapLabel);
 
     const slotBtns = document.createElement('div');
     slotBtns.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;';
     for (let i = 0; i < 3; i++) {
       const btn = document.createElement('button');
-      const knownCard = clientState.knownCards[i];
-      const valid = knownCard ? canSwapPlain(card, knownCard) : true; // If unknown, allow attempt
-
-      if (knownCard) {
-        if (valid) {
-          btn.className = 'btn btn-primary btn-sm';
-          btn.textContent = `#${i + 1} (${knownCard.rank}) ⬇️`;
-          btn.title = `Swap: replace ${knownCard.rank} with lower ${card.rank}`;
-        } else {
-          btn.className = 'btn btn-secondary btn-sm';
-          btn.style.opacity = '0.55';
-          btn.textContent = `#${i + 1} (${knownCard.rank}) 🚫`;
-          btn.title = `Cannot swap: drawn ${card.rank} is higher than slot ${knownCard.rank}`;
-        }
-      } else {
-        btn.className = 'btn btn-secondary btn-sm';
-        btn.textContent = `Slot #${i + 1} (?)`;
-        btn.title = `Attempt swap with slot #${i + 1}`;
-      }
-
+      btn.className = 'btn btn-primary btn-sm';
+      btn.textContent = `Slot #${i + 1}`;
+      btn.title = `Swap drawn card into slot #${i + 1}`;
       btn.addEventListener('click', () => onSwap(i));
       slotBtns.appendChild(btn);
     }
     actions.appendChild(slotBtns);
 
-    const hintText = document.createElement('div');
-    hintText.style.cssText = 'font-size:0.7rem;color:var(--text-muted);max-width:240px;line-height:1.2;margin-top:2px;';
-    hintText.textContent = '💡 Rule: Plain cards can only replace higher cards. Discard if you drew higher.';
-    actions.appendChild(hintText);
   }
 
   // Discard option
@@ -6240,10 +7173,17 @@ export function createDrawnCardPanel(card, { onSwap, onDiscard, onPlayAction, on
  * Remove the drawn card panel from the DOM.
  */
 export function removeDrawnCardPanel() {
+  if (panelRemoveTimeout) {
+    clearTimeout(panelRemoveTimeout);
+    panelRemoveTimeout = null;
+  }
   const panel = document.getElementById('drawn-card-panel');
   if (panel) {
     panel.style.animation = 'fadeOut 0.3s var(--ease-out) forwards';
-    setTimeout(() => panel.remove(), 300);
+    panelRemoveTimeout = setTimeout(() => {
+      panel.remove();
+      panelRemoveTimeout = null;
+    }, 300);
   }
 }
 
@@ -6263,15 +7203,53 @@ import socketClient from '../game/SocketClient.js';
 import { showToast } from './Toast.js';
 
 let modalOverlay = null;
+let activeModalInterval = null;
+let isPeekActive = false;
+let pendingRoundOverCb = null;
+let pendingRoundOverTimeout = null;
+
+export function isInspectionModalActive() {
+  return isPeekActive || !!(modalOverlay && modalOverlay.classList.contains('active'));
+}
+
+export function queueAfterInspection(callback) {
+  if (isInspectionModalActive()) {
+    pendingRoundOverCb = callback;
+    if (pendingRoundOverTimeout) clearTimeout(pendingRoundOverTimeout);
+    pendingRoundOverTimeout = setTimeout(() => {
+      pendingRoundOverTimeout = null;
+      if (pendingRoundOverCb) {
+        const cb = pendingRoundOverCb;
+        pendingRoundOverCb = null;
+        cb();
+      }
+    }, 5500);
+  } else {
+    callback();
+  }
+}
+
+function clearModalInterval() {
+  if (activeModalInterval) {
+    clearInterval(activeModalInterval);
+    activeModalInterval = null;
+  }
+}
 
 function getOverlay() {
-  if (!modalOverlay) {
+  if (!modalOverlay || !document.body.contains(modalOverlay)) {
     modalOverlay = document.getElementById('modal-overlay');
+    if (!modalOverlay) {
+      modalOverlay = document.createElement('div');
+      modalOverlay.id = 'modal-overlay';
+      document.body.appendChild(modalOverlay);
+    }
   }
   return modalOverlay;
 }
 
 function showModal(content) {
+  clearModalInterval();
   const overlay = getOverlay();
   overlay.innerHTML = '';
   overlay.appendChild(content);
@@ -6279,9 +7257,22 @@ function showModal(content) {
 }
 
 function hideModal() {
+  clearModalInterval();
+  isPeekActive = false;
   const overlay = getOverlay();
-  overlay.classList.remove('active');
-  overlay.innerHTML = '';
+  if (overlay) {
+    overlay.classList.remove('active');
+    overlay.innerHTML = '';
+  }
+  if (pendingRoundOverTimeout) {
+    clearTimeout(pendingRoundOverTimeout);
+    pendingRoundOverTimeout = null;
+  }
+  if (pendingRoundOverCb) {
+    const cb = pendingRoundOverCb;
+    pendingRoundOverCb = null;
+    cb();
+  }
 }
 
 /**
@@ -6312,13 +7303,13 @@ export function showPeekOwnModal(cards, isTriggered = false) {
   clientState.setAllKnownCards(cards);
 
   // Countdown
+  clearModalInterval();
   let seconds = 5;
   const timerEl = modal.querySelector('#peek-timer');
-  const interval = setInterval(() => {
+  activeModalInterval = setInterval(() => {
     seconds--;
     if (timerEl) timerEl.textContent = seconds;
     if (seconds <= 0) {
-      clearInterval(interval);
       hideModal();
     }
   }, 1000);
@@ -6336,13 +7327,22 @@ export function showPeekOpponentModal(isTriggered = false) {
   modal.className = 'action-modal';
   modal.innerHTML = `
     <div class="action-modal-title" style="color:var(--card-red);">👸 Queen: Peek Opponent</div>
-    <div class="action-modal-subtitle">Choose an opponent to reveal ALL their cards</div>
+    <div class="action-modal-subtitle">${others.length > 0 ? 'Choose an opponent to reveal ALL their cards' : 'No opponents available at the table'}</div>
     <div class="action-modal-options" id="peek-opponent-list"></div>
   `;
 
   showModal(modal);
 
   const listEl = modal.querySelector('#peek-opponent-list');
+  if (others.length === 0) {
+    const dismissBtn = document.createElement('button');
+    dismissBtn.className = 'btn btn-secondary btn-sm';
+    dismissBtn.textContent = 'Dismiss';
+    dismissBtn.addEventListener('click', () => hideModal());
+    listEl.appendChild(dismissBtn);
+    return;
+  }
+
   others.forEach(player => {
     const btn = document.createElement('button');
     btn.className = 'action-modal-option';
@@ -6417,21 +7417,14 @@ function showPeekedCards(cards, playerName) {
   const timerEl = modal.querySelector('#peek-timer');
   const gotItBtn = modal.querySelector('#peek-got-it-btn');
 
-  let closed = false;
-  const closeModal = () => {
-    if (closed) return;
-    closed = true;
-    clearInterval(interval);
-    hideModal();
-  };
+  gotItBtn.addEventListener('click', () => hideModal());
 
-  gotItBtn.addEventListener('click', closeModal);
-
-  const interval = setInterval(() => {
+  clearModalInterval();
+  activeModalInterval = setInterval(() => {
     seconds--;
-    timerEl.textContent = seconds;
+    if (timerEl) timerEl.textContent = seconds;
     if (seconds <= 0) {
-      closeModal();
+      hideModal();
     }
   }, 1000);
 }
@@ -6481,18 +7474,36 @@ function showTradeOpponentPicker(mySlot, isTriggered) {
   modal.className = 'action-modal';
   modal.innerHTML = `
     <div class="action-modal-title" style="color:var(--info);">🃏 Blind Trade</div>
-    <div class="action-modal-subtitle">Choose an opponent to trade with</div>
+    <div class="action-modal-subtitle">${others.length > 0 ? 'Choose an opponent to trade with' : 'No opponents available to trade with'}</div>
     <div class="action-modal-options" id="trade-opponent-list"></div>
   `;
 
   showModal(modal);
 
   const listEl = modal.querySelector('#trade-opponent-list');
+  if (others.length === 0) {
+    const dismissBtn = document.createElement('button');
+    dismissBtn.className = 'btn btn-secondary btn-sm';
+    dismissBtn.textContent = 'Dismiss';
+    dismissBtn.addEventListener('click', () => hideModal());
+    listEl.appendChild(dismissBtn);
+    return;
+  }
+
   others.forEach(player => {
     const btn = document.createElement('button');
     btn.className = 'action-modal-option';
-    btn.textContent = player.name;
+    const iconSpan = document.createElement('span');
+    iconSpan.style.fontSize = '1.1rem';
+    iconSpan.style.marginRight = '8px';
+    iconSpan.textContent = player.isBot ? '🤖' : '👤';
+    const nameStrong = document.createElement('strong');
+    nameStrong.textContent = player.name;
+    btn.appendChild(iconSpan);
+    btn.appendChild(document.createTextNode(' '));
+    btn.appendChild(nameStrong);
     btn.addEventListener('click', () => {
+      btn.disabled = true;
       showTradeSlotPicker(mySlot, player, isTriggered);
     });
     listEl.appendChild(btn);
@@ -6527,6 +7538,8 @@ function showTradeSlotPicker(mySlot, targetPlayer, isTriggered) {
     btn.style.padding = '10px 14px';
     btn.style.fontSize = 'var(--fs-sm)';
     btn.addEventListener('click', () => {
+      // Disable all slot pick buttons to prevent double-submission
+      pickerEl.querySelectorAll('button').forEach(b => b.disabled = true);
       if (isTriggered) {
         socketClient.emit('resolve-triggered-action', {
           actionType: 'blind-trade',
@@ -6567,18 +7580,37 @@ export function showScrambleModal(isTriggered = false) {
   modal.className = 'action-modal';
   modal.innerHTML = `
     <div class="action-modal-title" style="color:var(--warning);">🔀 Scramble</div>
-    <div class="action-modal-subtitle">Choose an opponent to scramble</div>
+    <div class="action-modal-subtitle">${others.length > 0 ? 'Choose an opponent to scramble' : 'No opponents available to scramble'}</div>
     <div class="action-modal-options" id="scramble-opponent-list"></div>
   `;
 
   showModal(modal);
 
   const listEl = modal.querySelector('#scramble-opponent-list');
+  if (others.length === 0) {
+    const dismissBtn = document.createElement('button');
+    dismissBtn.className = 'btn btn-secondary btn-sm';
+    dismissBtn.textContent = 'Dismiss';
+    dismissBtn.addEventListener('click', () => hideModal());
+    listEl.appendChild(dismissBtn);
+    return;
+  }
+
   others.forEach(player => {
     const btn = document.createElement('button');
     btn.className = 'action-modal-option';
-    btn.textContent = player.name;
+    const iconSpan = document.createElement('span');
+    iconSpan.style.fontSize = '1.1rem';
+    iconSpan.style.marginRight = '8px';
+    iconSpan.textContent = player.isBot ? '🤖' : '👤';
+    const nameStrong = document.createElement('strong');
+    nameStrong.textContent = player.name;
+    btn.appendChild(iconSpan);
+    btn.appendChild(document.createTextNode(' '));
+    btn.appendChild(nameStrong);
     btn.addEventListener('click', () => {
+      btn.disabled = true;
+      btn.textContent = 'Scrambling...';
       if (isTriggered) {
         socketClient.emit('resolve-triggered-action', {
           actionType: 'scramble',
@@ -6608,6 +7640,9 @@ export function showScrambleModal(isTriggered = false) {
  * Dispatch to the correct action modal based on type.
  */
 export function showActionModal(actionType, isTriggered = false, extraData = null) {
+  if (actionType === 'peek-own' || actionType === 'peek-opponent') {
+    isPeekActive = true;
+  }
   switch (actionType) {
     case 'peek-own':
       if (extraData?.cards) {
@@ -6646,7 +7681,7 @@ export function showActionModal(actionType, isTriggered = false, extraData = nul
 }
 
 export { hideModal };
-export default { showActionModal, hideModal };
+export default { showActionModal, hideModal, isInspectionModalActive, queueAfterInspection };
 ```
 
 ---
@@ -6825,6 +7860,7 @@ body {
   color: var(--text-primary);
   line-height: 1.6;
   min-height: 100vh;
+  min-height: 100dvh;
   overflow-x: hidden;
 }
 
@@ -6859,6 +7895,7 @@ img {
 /* ─── App Container ─────────────────────────────────── */
 #app {
   min-height: 100vh;
+  min-height: 100dvh;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -7063,6 +8100,116 @@ img {
   background: var(--gold);
   color: var(--bg-primary);
 }
+
+/* ─── HUD Leave Button ───────────────────────────────── */
+.hud-leave-btn {
+  font-size: var(--fs-xs);
+  padding: 4px 8px;
+  color: hsla(0, 72%, 70%, 0.8);
+  border: 1px solid hsla(0, 72%, 52%, 0.25);
+  border-radius: var(--radius-sm);
+  transition: color var(--duration-fast),
+              border-color var(--duration-fast),
+              background var(--duration-fast);
+}
+
+.hud-leave-btn:hover {
+  color: hsl(0, 72%, 75%);
+  border-color: hsla(0, 72%, 52%, 0.55);
+  background: hsla(0, 72%, 52%, 0.1);
+}
+
+/* Hide the text label on very small screens — keep just the icon */
+@media (max-width: 420px) {
+  .hud-leave-label { display: none; }
+}
+
+/* ─── Leave Confirm Modal ────────────────────────────── */
+.leave-confirm-modal {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-md);
+  max-width: 420px;
+  width: calc(100% - var(--space-xl));
+  padding: var(--space-2xl) var(--space-xl);
+  text-align: center;
+  animation: modal-slide-up 0.3s var(--ease-out) both;
+}
+
+@keyframes modal-slide-up {
+  from { opacity: 0; transform: translateY(20px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0)    scale(1); }
+}
+
+.leave-confirm-icon {
+  font-size: 3rem;
+  line-height: 1;
+  filter: drop-shadow(0 0 12px hsla(0, 72%, 52%, 0.4));
+}
+
+.leave-confirm-title {
+  font-family: var(--font-heading);
+  font-size: var(--fs-2xl);
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.leave-confirm-body {
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+  max-width: 320px;
+}
+
+.leave-confirm-warning {
+  font-size: var(--fs-xs);
+  color: hsl(38, 92%, 70%);
+  background: hsla(38, 92%, 55%, 0.08);
+  border: 1px solid hsla(38, 92%, 55%, 0.25);
+  border-radius: var(--radius-sm);
+  padding: var(--space-sm) var(--space-md);
+  width: 100%;
+}
+
+.leave-confirm-btns {
+  display: flex;
+  gap: var(--space-md);
+  width: 100%;
+  margin-top: var(--space-sm);
+}
+
+.leave-confirm-btns .btn {
+  flex: 1;
+}
+
+/* Danger confirm button */
+.leave-confirm-danger {
+  background: hsla(0, 72%, 40%, 0.2);
+  border: 1px solid hsla(0, 72%, 52%, 0.5);
+  color: hsl(0, 85%, 75%);
+  font-weight: 700;
+  transition: background var(--duration-fast),
+              border-color var(--duration-fast),
+              transform var(--duration-fast);
+}
+
+.leave-confirm-danger:hover:not(:disabled) {
+  background: hsla(0, 72%, 40%, 0.35);
+  border-color: hsl(0, 72%, 60%);
+  transform: scale(1.02);
+}
+
+.leave-confirm-danger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Stack buttons vertically on very small screens */
+@media (max-width: 380px) {
+  .leave-confirm-btns { flex-direction: column; }
+  .leave-confirm-modal { padding: var(--space-xl) var(--space-lg); }
+}
 ```
 
 ---
@@ -7079,6 +8226,7 @@ img {
   position: relative;
   width: 100vw;
   height: 100vh;
+  height: 100dvh;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -7276,17 +8424,18 @@ img {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 120px;
+  max-width: 150px;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
   transition: all var(--duration-normal);
 }
 
 .seat-avatar {
+  display: none;
   font-size: 11px;
 }
 
 .seat-name-text {
-  max-width: 90px;
+  max-width: 110px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -7481,7 +8630,8 @@ img {
   padding: var(--space-md) var(--space-xl);
   border: 2px solid var(--gold-dark);
   border-radius: var(--radius-lg);
-  background: hsla(43, 85%, 55%, 0.05);
+  background: hsla(43, 85%, 55%, 0.08);
+  -webkit-text-fill-color: initial;
   text-align: center;
   user-select: all;
 }
@@ -8100,6 +9250,28 @@ img {
   text-transform: uppercase;
   letter-spacing: 0.05em;
   box-shadow: 0 2px 6px var(--gold-glow);
+}
+
+/* ─── Card Slot Badge (Issue U8) ─────────────────────── */
+.card-slot-badge {
+  position: absolute;
+  bottom: 3px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-family: var(--font-heading);
+  font-size: 8px;
+  font-weight: 700;
+  color: hsla(43, 85%, 55%, 0.75);
+  background: hsla(220, 25%, 10%, 0.75);
+  padding: 1px 4px;
+  border-radius: var(--radius-full);
+  z-index: 5;
+  pointer-events: none;
+  letter-spacing: 0.05em;
+}
+
+.card.flipped .card-slot-badge {
+  display: none;
 }
 
 /* ─── Card Hover / Interactive States ────────────────── */
@@ -8918,6 +10090,523 @@ img {
 
 ---
 
+### `src/styles/howtoplay.css`
+
+```css
+/* ══════════════════════════════════════════════════════
+   howtoplay.css — How to Play screen styles
+   ══════════════════════════════════════════════════════ */
+
+/* ─── Page shell ─────────────────────────────────────── */
+.htp-screen {
+  position: relative;
+  min-height: 100vh;
+  background: var(--bg-primary);
+  overflow-x: hidden;
+}
+
+/* ─── Sticky back bar ────────────────────────────────── */
+.htp-back-bar {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  padding: var(--space-sm) var(--space-lg);
+  background: hsla(220, 22%, 6%, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--glass-border);
+}
+
+.htp-back-btn {
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+  transition: color var(--duration-fast);
+}
+.htp-back-btn:hover { color: var(--text-primary); }
+
+/* ─── Content wrapper ─────────────────────────────────── */
+.htp-content {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: var(--space-xl) var(--space-lg) var(--space-3xl);
+}
+
+/* ─── Hero ────────────────────────────────────────────── */
+.htp-hero {
+  text-align: center;
+  padding: var(--space-2xl) 0 var(--space-xl);
+}
+
+.htp-hero-title {
+  font-size: clamp(2.5rem, 8vw, 4rem);
+  font-family: var(--font-heading);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  margin-bottom: var(--space-md);
+}
+
+.htp-hero-sub {
+  font-size: clamp(1rem, 2.5vw, var(--fs-lg));
+  color: var(--text-secondary);
+  max-width: 520px;
+  margin: 0 auto;
+  line-height: 1.7;
+}
+.htp-hero-sub strong { color: var(--text-primary); }
+
+/* ─── Section ─────────────────────────────────────────── */
+.htp-section {
+  margin-bottom: var(--space-2xl);
+}
+
+.htp-section-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  margin-bottom: var(--space-lg);
+}
+
+.htp-section-icon {
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.4rem;
+  flex-shrink: 0;
+}
+
+.htp-section-title {
+  font-size: clamp(1.3rem, 4vw, var(--fs-2xl));
+  font-family: var(--font-heading);
+  font-weight: 700;
+}
+
+/* ─── Cards / Glass surfaces ─────────────────────────── */
+.htp-card {
+  padding: var(--space-lg) var(--space-xl);
+  border-radius: var(--radius-lg);
+  line-height: 1.7;
+}
+
+.htp-lead {
+  font-size: var(--fs-lg);
+  margin-bottom: var(--space-md);
+  color: var(--text-secondary);
+}
+.htp-lead strong { color: var(--text-primary); }
+
+.htp-body {
+  color: var(--text-secondary);
+  margin-bottom: var(--space-md);
+  line-height: 1.7;
+}
+.htp-body strong { color: var(--text-primary); }
+
+.htp-muted { color: var(--text-muted); }
+
+/* ─── Highlight box ───────────────────────────────────── */
+.htp-highlight-box {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-md);
+  background: hsla(43, 85%, 55%, 0.08);
+  border: 1px solid hsla(43, 85%, 55%, 0.25);
+  border-radius: var(--radius-md);
+  padding: var(--space-md) var(--space-lg);
+  margin-top: var(--space-md);
+}
+
+.htp-highlight-icon {
+  font-size: 1.5rem;
+  flex-shrink: 0;
+}
+
+/* ─── Step list ───────────────────────────────────────── */
+.htp-steps {
+  list-style: none;
+  counter-reset: htp-step;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  padding: 0;
+  margin-bottom: var(--space-md);
+}
+
+.htp-step {
+  counter-increment: htp-step;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-md);
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-md) var(--space-lg);
+  line-height: 1.6;
+  color: var(--text-secondary);
+  transition: border-color var(--duration-normal), background var(--duration-normal);
+}
+
+.htp-step strong { color: var(--text-primary); }
+
+.htp-step:hover {
+  background: hsla(220, 20%, 12%, 0.9);
+  border-color: hsla(0, 0%, 100%, 0.14);
+}
+
+.htp-step::before {
+  content: counter(htp-step);
+  min-width: 28px;
+  height: 28px;
+  background: hsla(210, 80%, 58%, 0.15);
+  border: 1px solid hsla(210, 80%, 58%, 0.35);
+  border-radius: var(--radius-full);
+  color: hsl(210, 80%, 68%);
+  font-family: var(--font-heading);
+  font-weight: 700;
+  font-size: var(--fs-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+/* ─── Callouts ────────────────────────────────────────── */
+.htp-callout {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-md);
+  border-radius: var(--radius-md);
+  padding: var(--space-md) var(--space-lg);
+  margin-top: var(--space-md);
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+}
+
+.htp-callout--warning {
+  background: hsla(38, 92%, 55%, 0.08);
+  border: 1px solid hsla(38, 92%, 55%, 0.25);
+  color: hsl(38, 92%, 80%);
+}
+
+.htp-callout--info {
+  background: hsla(210, 80%, 58%, 0.08);
+  border: 1px solid hsla(210, 80%, 58%, 0.25);
+  color: hsl(210, 80%, 80%);
+}
+
+/* ─── Turn grid ───────────────────────────────────────── */
+.htp-turn-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-md);
+}
+
+@media (max-width: 620px) {
+  .htp-turn-grid { grid-template-columns: 1fr; }
+}
+
+.htp-turn-card {
+  padding: var(--space-lg);
+  border-radius: var(--radius-lg);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.htp-turn-card p {
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+}
+
+.htp-turn-card-header {
+  font-family: var(--font-heading);
+  font-weight: 700;
+  font-size: var(--fs-lg);
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-xs);
+}
+
+.htp-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  padding: 0;
+}
+
+.htp-list li {
+  padding-left: var(--space-md);
+  position: relative;
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+}
+.htp-list li::before {
+  content: '›';
+  position: absolute;
+  left: 0;
+  color: var(--text-muted);
+}
+.htp-list li strong { color: var(--text-primary); }
+
+.htp-turn-warning {
+  font-size: var(--fs-xs);
+  color: hsl(38, 92%, 70%);
+  background: hsla(38, 92%, 55%, 0.08);
+  border: 1px solid hsla(38, 92%, 55%, 0.2);
+  border-radius: var(--radius-sm);
+  padding: var(--space-xs) var(--space-sm);
+  margin-top: var(--space-xs);
+}
+
+.htp-turn-note {
+  font-size: var(--fs-xs);
+  color: hsl(145, 65%, 65%);
+  background: hsla(145, 65%, 42%, 0.08);
+  border: 1px solid hsla(145, 65%, 42%, 0.2);
+  border-radius: var(--radius-sm);
+  padding: var(--space-xs) var(--space-sm);
+  margin-top: var(--space-xs);
+}
+
+/* ─── Action card grid ────────────────────────────────── */
+.htp-action-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-md);
+}
+
+@media (max-width: 620px) {
+  .htp-action-grid { grid-template-columns: 1fr; }
+}
+
+.htp-action-card {
+  padding: var(--space-lg);
+  border-radius: var(--radius-lg);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  transition: transform var(--duration-normal) var(--ease-spring),
+              box-shadow var(--duration-normal);
+}
+
+.htp-action-card:hover {
+  transform: translateY(-3px);
+  box-shadow: var(--shadow-lg);
+}
+
+.htp-action-rank {
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-md);
+  border: 2px solid;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-heading);
+  font-weight: 800;
+  font-size: 1.5rem;
+  flex-shrink: 0;
+}
+
+.htp-action-name {
+  font-family: var(--font-heading);
+  font-weight: 700;
+  font-size: var(--fs-base);
+}
+
+.htp-action-desc {
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+}
+
+.htp-action-tip {
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+  border-top: 1px solid var(--glass-border);
+  padding-top: var(--space-sm);
+  margin-top: var(--space-xs);
+  line-height: 1.5;
+}
+
+/* ─── Card values table ───────────────────────────────── */
+.htp-table-wrap {
+  overflow-x: auto;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--glass-border);
+  margin-bottom: var(--space-md);
+}
+
+.htp-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-sm);
+}
+
+.htp-table thead tr {
+  background: hsla(220, 20%, 12%, 0.9);
+}
+
+.htp-table th {
+  padding: var(--space-sm) var(--space-lg);
+  text-align: left;
+  font-family: var(--font-heading);
+  font-weight: 600;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  border-bottom: 1px solid var(--glass-border);
+}
+
+.htp-table td {
+  padding: var(--space-sm) var(--space-lg);
+  color: var(--text-secondary);
+  border-bottom: 1px solid hsla(0, 0%, 100%, 0.04);
+}
+
+.htp-table tbody tr:last-child td { border-bottom: none; }
+
+.htp-table tbody tr:hover td {
+  background: var(--glass-hover);
+  color: var(--text-primary);
+}
+
+.htp-val {
+  font-family: var(--font-heading);
+  font-weight: 700;
+  color: var(--text-primary) !important;
+}
+
+.htp-type { color: var(--text-muted); }
+
+.htp-action-row td { background: hsla(43, 85%, 55%, 0.04); }
+.htp-badge-action {
+  color: hsl(43, 85%, 65%) !important;
+  font-weight: 600;
+}
+
+/* ─── End grid ────────────────────────────────────────── */
+.htp-end-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--space-md);
+}
+
+@media (max-width: 680px) {
+  .htp-end-grid { grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 400px) {
+  .htp-end-grid { grid-template-columns: 1fr; }
+}
+
+.htp-end-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: var(--space-sm);
+  padding: var(--space-md);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  background: var(--glass-bg);
+}
+
+.htp-end-item strong {
+  font-family: var(--font-heading);
+  font-weight: 700;
+  font-size: var(--fs-sm);
+}
+
+.htp-end-item p {
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.htp-end-icon { font-size: 1.8rem; }
+
+/* ─── Tips list ───────────────────────────────────────── */
+.htp-tips-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.htp-tip-item {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-md);
+  padding: var(--space-md) var(--space-lg);
+  border-radius: var(--radius-md);
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+  line-height: 1.6;
+  transition: transform var(--duration-normal) var(--ease-spring),
+              border-color var(--duration-normal);
+}
+
+.htp-tip-item:hover {
+  transform: translateX(4px);
+  border-color: hsla(0, 0%, 100%, 0.14);
+}
+
+.htp-tip-item strong { color: var(--text-primary); }
+
+.htp-tip-icon {
+  font-size: 1.3rem;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+/* ─── CTA ─────────────────────────────────────────────── */
+.htp-cta {
+  display: flex;
+  justify-content: center;
+  padding-top: var(--space-xl);
+}
+
+.htp-cta .btn {
+  padding: 14px 40px;
+  font-size: var(--fs-lg);
+  animation: pulse-glow 2.5s ease-in-out infinite;
+}
+
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 0 0 var(--gold-glow); }
+  50% { box-shadow: 0 0 24px 4px var(--gold-glow); }
+}
+
+/* ─── Scroll reveal ───────────────────────────────────── */
+.htp-reveal {
+  opacity: 0;
+  transform: translateY(24px);
+  transition: opacity 0.55s var(--ease-out), transform 0.55s var(--ease-out);
+}
+
+.htp-revealed {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* ─── Responsive overrides ────────────────────────────── */
+@media (max-width: 640px) {
+  .htp-content { padding: var(--space-lg) var(--space-md) var(--space-2xl); }
+  .htp-hero { padding: var(--space-lg) 0; }
+  .htp-card { padding: var(--space-md); }
+  .htp-section-icon { width: 40px; height: 40px; font-size: 1.1rem; }
+  .htp-table th, .htp-table td { padding: var(--space-sm) var(--space-md); }
+}
+```
+
+---
+
 ### `scripts/build_source_doc.js`
 
 ```javascript
@@ -8952,6 +10641,7 @@ const fileOrder = [
   'src/screens/WaitingRoom.js',
   'src/screens/GameScreen.js',
   'src/screens/ResultsScreen.js',
+  'src/screens/HowToPlayScreen.js',
   'src/components/Table.js',
   'src/components/Seat.js',
   'src/components/Card.js',
@@ -8964,6 +10654,7 @@ const fileOrder = [
   'src/styles/table.css',
   'src/styles/cards.css',
   'src/styles/animations.css',
+  'src/styles/howtoplay.css',
   'scripts/build_source_doc.js'
 ];
 

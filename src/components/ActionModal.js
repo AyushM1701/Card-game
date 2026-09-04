@@ -6,15 +6,53 @@ import socketClient from '../game/SocketClient.js';
 import { showToast } from './Toast.js';
 
 let modalOverlay = null;
+let activeModalInterval = null;
+let isPeekActive = false;
+let pendingRoundOverCb = null;
+let pendingRoundOverTimeout = null;
+
+export function isInspectionModalActive() {
+  return isPeekActive || !!(modalOverlay && modalOverlay.classList.contains('active'));
+}
+
+export function queueAfterInspection(callback) {
+  if (isInspectionModalActive()) {
+    pendingRoundOverCb = callback;
+    if (pendingRoundOverTimeout) clearTimeout(pendingRoundOverTimeout);
+    pendingRoundOverTimeout = setTimeout(() => {
+      pendingRoundOverTimeout = null;
+      if (pendingRoundOverCb) {
+        const cb = pendingRoundOverCb;
+        pendingRoundOverCb = null;
+        cb();
+      }
+    }, 5500);
+  } else {
+    callback();
+  }
+}
+
+function clearModalInterval() {
+  if (activeModalInterval) {
+    clearInterval(activeModalInterval);
+    activeModalInterval = null;
+  }
+}
 
 function getOverlay() {
-  if (!modalOverlay) {
+  if (!modalOverlay || !document.body.contains(modalOverlay)) {
     modalOverlay = document.getElementById('modal-overlay');
+    if (!modalOverlay) {
+      modalOverlay = document.createElement('div');
+      modalOverlay.id = 'modal-overlay';
+      document.body.appendChild(modalOverlay);
+    }
   }
   return modalOverlay;
 }
 
 function showModal(content) {
+  clearModalInterval();
   const overlay = getOverlay();
   overlay.innerHTML = '';
   overlay.appendChild(content);
@@ -22,9 +60,22 @@ function showModal(content) {
 }
 
 function hideModal() {
+  clearModalInterval();
+  isPeekActive = false;
   const overlay = getOverlay();
-  overlay.classList.remove('active');
-  overlay.innerHTML = '';
+  if (overlay) {
+    overlay.classList.remove('active');
+    overlay.innerHTML = '';
+  }
+  if (pendingRoundOverTimeout) {
+    clearTimeout(pendingRoundOverTimeout);
+    pendingRoundOverTimeout = null;
+  }
+  if (pendingRoundOverCb) {
+    const cb = pendingRoundOverCb;
+    pendingRoundOverCb = null;
+    cb();
+  }
 }
 
 /**
@@ -55,13 +106,13 @@ export function showPeekOwnModal(cards, isTriggered = false) {
   clientState.setAllKnownCards(cards);
 
   // Countdown
+  clearModalInterval();
   let seconds = 5;
   const timerEl = modal.querySelector('#peek-timer');
-  const interval = setInterval(() => {
+  activeModalInterval = setInterval(() => {
     seconds--;
     if (timerEl) timerEl.textContent = seconds;
     if (seconds <= 0) {
-      clearInterval(interval);
       hideModal();
     }
   }, 1000);
@@ -79,13 +130,22 @@ export function showPeekOpponentModal(isTriggered = false) {
   modal.className = 'action-modal';
   modal.innerHTML = `
     <div class="action-modal-title" style="color:var(--card-red);">👸 Queen: Peek Opponent</div>
-    <div class="action-modal-subtitle">Choose an opponent to reveal ALL their cards</div>
+    <div class="action-modal-subtitle">${others.length > 0 ? 'Choose an opponent to reveal ALL their cards' : 'No opponents available at the table'}</div>
     <div class="action-modal-options" id="peek-opponent-list"></div>
   `;
 
   showModal(modal);
 
   const listEl = modal.querySelector('#peek-opponent-list');
+  if (others.length === 0) {
+    const dismissBtn = document.createElement('button');
+    dismissBtn.className = 'btn btn-secondary btn-sm';
+    dismissBtn.textContent = 'Dismiss';
+    dismissBtn.addEventListener('click', () => hideModal());
+    listEl.appendChild(dismissBtn);
+    return;
+  }
+
   others.forEach(player => {
     const btn = document.createElement('button');
     btn.className = 'action-modal-option';
@@ -160,21 +220,14 @@ function showPeekedCards(cards, playerName) {
   const timerEl = modal.querySelector('#peek-timer');
   const gotItBtn = modal.querySelector('#peek-got-it-btn');
 
-  let closed = false;
-  const closeModal = () => {
-    if (closed) return;
-    closed = true;
-    clearInterval(interval);
-    hideModal();
-  };
+  gotItBtn.addEventListener('click', () => hideModal());
 
-  gotItBtn.addEventListener('click', closeModal);
-
-  const interval = setInterval(() => {
+  clearModalInterval();
+  activeModalInterval = setInterval(() => {
     seconds--;
-    timerEl.textContent = seconds;
+    if (timerEl) timerEl.textContent = seconds;
     if (seconds <= 0) {
-      closeModal();
+      hideModal();
     }
   }, 1000);
 }
@@ -224,18 +277,36 @@ function showTradeOpponentPicker(mySlot, isTriggered) {
   modal.className = 'action-modal';
   modal.innerHTML = `
     <div class="action-modal-title" style="color:var(--info);">🃏 Blind Trade</div>
-    <div class="action-modal-subtitle">Choose an opponent to trade with</div>
+    <div class="action-modal-subtitle">${others.length > 0 ? 'Choose an opponent to trade with' : 'No opponents available to trade with'}</div>
     <div class="action-modal-options" id="trade-opponent-list"></div>
   `;
 
   showModal(modal);
 
   const listEl = modal.querySelector('#trade-opponent-list');
+  if (others.length === 0) {
+    const dismissBtn = document.createElement('button');
+    dismissBtn.className = 'btn btn-secondary btn-sm';
+    dismissBtn.textContent = 'Dismiss';
+    dismissBtn.addEventListener('click', () => hideModal());
+    listEl.appendChild(dismissBtn);
+    return;
+  }
+
   others.forEach(player => {
     const btn = document.createElement('button');
     btn.className = 'action-modal-option';
-    btn.textContent = player.name;
+    const iconSpan = document.createElement('span');
+    iconSpan.style.fontSize = '1.1rem';
+    iconSpan.style.marginRight = '8px';
+    iconSpan.textContent = player.isBot ? '🤖' : '👤';
+    const nameStrong = document.createElement('strong');
+    nameStrong.textContent = player.name;
+    btn.appendChild(iconSpan);
+    btn.appendChild(document.createTextNode(' '));
+    btn.appendChild(nameStrong);
     btn.addEventListener('click', () => {
+      btn.disabled = true;
       showTradeSlotPicker(mySlot, player, isTriggered);
     });
     listEl.appendChild(btn);
@@ -270,6 +341,8 @@ function showTradeSlotPicker(mySlot, targetPlayer, isTriggered) {
     btn.style.padding = '10px 14px';
     btn.style.fontSize = 'var(--fs-sm)';
     btn.addEventListener('click', () => {
+      // Disable all slot pick buttons to prevent double-submission
+      pickerEl.querySelectorAll('button').forEach(b => b.disabled = true);
       if (isTriggered) {
         socketClient.emit('resolve-triggered-action', {
           actionType: 'blind-trade',
@@ -310,18 +383,37 @@ export function showScrambleModal(isTriggered = false) {
   modal.className = 'action-modal';
   modal.innerHTML = `
     <div class="action-modal-title" style="color:var(--warning);">🔀 Scramble</div>
-    <div class="action-modal-subtitle">Choose an opponent to scramble</div>
+    <div class="action-modal-subtitle">${others.length > 0 ? 'Choose an opponent to scramble' : 'No opponents available to scramble'}</div>
     <div class="action-modal-options" id="scramble-opponent-list"></div>
   `;
 
   showModal(modal);
 
   const listEl = modal.querySelector('#scramble-opponent-list');
+  if (others.length === 0) {
+    const dismissBtn = document.createElement('button');
+    dismissBtn.className = 'btn btn-secondary btn-sm';
+    dismissBtn.textContent = 'Dismiss';
+    dismissBtn.addEventListener('click', () => hideModal());
+    listEl.appendChild(dismissBtn);
+    return;
+  }
+
   others.forEach(player => {
     const btn = document.createElement('button');
     btn.className = 'action-modal-option';
-    btn.textContent = player.name;
+    const iconSpan = document.createElement('span');
+    iconSpan.style.fontSize = '1.1rem';
+    iconSpan.style.marginRight = '8px';
+    iconSpan.textContent = player.isBot ? '🤖' : '👤';
+    const nameStrong = document.createElement('strong');
+    nameStrong.textContent = player.name;
+    btn.appendChild(iconSpan);
+    btn.appendChild(document.createTextNode(' '));
+    btn.appendChild(nameStrong);
     btn.addEventListener('click', () => {
+      btn.disabled = true;
+      btn.textContent = 'Scrambling...';
       if (isTriggered) {
         socketClient.emit('resolve-triggered-action', {
           actionType: 'scramble',
@@ -351,6 +443,9 @@ export function showScrambleModal(isTriggered = false) {
  * Dispatch to the correct action modal based on type.
  */
 export function showActionModal(actionType, isTriggered = false, extraData = null) {
+  if (actionType === 'peek-own' || actionType === 'peek-opponent') {
+    isPeekActive = true;
+  }
   switch (actionType) {
     case 'peek-own':
       if (extraData?.cards) {
@@ -389,4 +484,4 @@ export function showActionModal(actionType, isTriggered = false, extraData = nul
 }
 
 export { hideModal };
-export default { showActionModal, hideModal };
+export default { showActionModal, hideModal, isInspectionModalActive, queueAfterInspection };

@@ -19,9 +19,26 @@ const allowedOrigins = process.env.CLIENT_ORIGIN
   ? process.env.CLIENT_ORIGIN.split(',').map(s => s.trim()).filter(Boolean)
   : ['http://localhost:3000'];
 
+const isOriginAllowed = (origin) => {
+  if (!origin) return true; // same-origin or server-to-server requests
+  if (allowedOrigins.includes(origin) || allowedOrigins.includes('*')) return true;
+  try {
+    const parsed = new URL(origin);
+    if (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1') return true;
+    if (parsed.hostname.endsWith('.onrender.com')) return true;
+  } catch {}
+  return false;
+};
+
 const io = new Server(httpServer, {
   cors: {
-    origin: allowedOrigins,
+    origin: (origin, callback) => {
+      if (isOriginAllowed(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error('CORS not allowed'));
+      }
+    },
     methods: ['GET', 'POST']
   }
 });
@@ -51,6 +68,19 @@ io.use((socket, next) => {
 });
 
 // API routes
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (isOriginAllowed(origin)) {
+    if (origin) res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  }
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+  next();
+});
+
 app.use(express.json());
 
 app.get('/health', (req, res) => {

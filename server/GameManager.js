@@ -83,6 +83,7 @@ class GameManager {
   startNextRound(room) {
     const game = this.games.get(room.code);
     if (!game) return null;
+    if (game.roundNumber >= (game.totalRounds || 1)) return null;
 
     const { deck, hands } = this._dealHands(room);
 
@@ -95,6 +96,7 @@ class GameManager {
     game.drawPile = deck;
     game.discardPile = [];
     game.hands = hands;
+    game.playerOrder = room.players.map(p => p.id);
     game.currentPlayerIndex = 0;
     game.drawnCard = null;
     game.drawnByPlayerId = null;
@@ -103,13 +105,22 @@ class GameManager {
     game.roundNumber += 1;
     game.roundOverEmitted = false;
 
+    // Ensure all players have an initialized score entry
+    for (const player of room.players) {
+      if (game.scores[player.id] === undefined) {
+        game.scores[player.id] = 0;
+      }
+    }
+
     return game;
   }
 
   isMatchOver(roomCode) {
     const game = this.games.get(roomCode);
     if (!game) return true;
-    return game.roundNumber >= game.totalRounds;
+    return game.phase === PHASE.ROUND_OVER
+      ? game.roundNumber >= (game.totalRounds || 1)
+      : game.roundNumber > (game.totalRounds || 1);
   }
 
   /**
@@ -257,6 +268,7 @@ class GameManager {
       return { success: false, error: 'No action card drawn' };
     }
 
+    const playedCard = { ...game.drawnCard };
     const actionType = getActionType(game.drawnCard);
     game.discardPile.push(game.drawnCard);
     game.drawnCard = null;
@@ -269,7 +281,7 @@ class GameManager {
     };
 
     // The action will be resolved by the socket handler after getting target info
-    return { success: true, actionType };
+    return { success: true, actionType, card: playedCard };
   }
 
   /**
@@ -280,7 +292,6 @@ class GameManager {
     if (!game || game.phase !== PHASE.PLAYING) return null;
     const hand = game.hands[playerId];
     if (!hand) return null;
-    game.pendingAction = null;
     return hand.cards.map(c => ({ ...c }));
   }
 
@@ -292,9 +303,9 @@ class GameManager {
     const game = this.games.get(roomCode);
     if (!game || game.phase !== PHASE.PLAYING) return null;
     if (targetPlayerId === playerId) return null;
+    if (!game.playerOrder.includes(targetPlayerId)) return null;
     const targetHand = game.hands[targetPlayerId];
     if (!targetHand) return null;
-    game.pendingAction = null;
     return targetHand.cards.map(c => ({ ...c }));
   }
 
@@ -305,6 +316,7 @@ class GameManager {
     const game = this.games.get(roomCode);
     if (!game || game.phase !== PHASE.PLAYING) return false;
     if (targetPlayerId === playerId) return false;
+    if (!game.playerOrder.includes(targetPlayerId)) return false;
 
     const myHand = game.hands[playerId];
     const targetHand = game.hands[targetPlayerId];
@@ -316,7 +328,6 @@ class GameManager {
     myHand.cards[mySlot] = targetHand.cards[targetSlot];
     targetHand.cards[targetSlot] = temp;
 
-    game.pendingAction = null;
     return true;
   }
 
@@ -327,6 +338,7 @@ class GameManager {
     const game = this.games.get(roomCode);
     if (!game || game.phase !== PHASE.PLAYING) return false;
     if (targetPlayerId === playerId) return false;
+    if (!game.playerOrder.includes(targetPlayerId)) return false;
 
     const targetHand = game.hands[targetPlayerId];
     if (!targetHand) return false;
@@ -338,7 +350,6 @@ class GameManager {
       [cards[i], cards[j]] = [cards[j], cards[i]];
     }
 
-    game.pendingAction = null;
     return true;
   }
 
@@ -362,6 +373,8 @@ class GameManager {
 
     const view = {
       phase: game.phase,
+      peeksDoneCount: game.peeksDone ? game.peeksDone.size : 0,
+      totalPeeksNeeded: game.playerOrder ? game.playerOrder.length : 0,
       drawPileCount: game.drawPile.length,
       discardPile: game.discardPile.length > 0
         ? [{ ...game.discardPile[game.discardPile.length - 1] }]
@@ -396,6 +409,10 @@ class GameManager {
       view.drawnCard = { ...game.drawnCard };
     }
 
+    if (game.phase === PHASE.ROUND_OVER) {
+      view.roundResults = this.getRoundResults(roomCode);
+    }
+
     return view;
   }
 
@@ -421,7 +438,12 @@ class GameManager {
 
     // Sort by roundTotal ascending (lowest wins round)
     results.sort((a, b) => a.roundTotal - b.roundTotal);
-    results[0].isWinner = true;
+    if (results.length > 0) {
+      const minScore = results[0].roundTotal;
+      results.forEach(r => {
+        r.isWinner = (r.roundTotal === minScore);
+      });
+    }
 
     return {
       roundNumber: game.roundNumber,
@@ -439,12 +461,13 @@ class GameManager {
     const game = this.games.get(roomCode);
     if (!game) return;
 
-    game.currentPlayerIndex = (game.currentPlayerIndex + 1) % game.playerOrder.length;
-
-    // Check if draw pile is empty — if so, end the round
+    // Check if draw pile is empty — if so, end the round without advancing turn
     if (game.drawPile.length === 0) {
       this._endRound(roomCode);
+      return;
     }
+
+    game.currentPlayerIndex = (game.currentPlayerIndex + 1) % game.playerOrder.length;
   }
 
   /**
@@ -452,7 +475,7 @@ class GameManager {
    */
   _endRound(roomCode) {
     const game = this.games.get(roomCode);
-    if (!game) return;
+    if (!game || game.phase === PHASE.ROUND_OVER) return;
 
     if (game.turnTimer) {
       clearTimeout(game.turnTimer);

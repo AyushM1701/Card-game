@@ -5,6 +5,7 @@ import socketClient from '../game/SocketClient.js';
 import { showToast } from '../components/Toast.js';
 
 let waitingListeners = [];
+let currentNavigate = null;
 
 function cleanupWaitingListeners() {
   waitingListeners.forEach(({ event, handler }) => {
@@ -12,6 +13,8 @@ function cleanupWaitingListeners() {
   });
   waitingListeners = [];
 }
+
+export { cleanupWaitingListeners };
 
 function onSocket(event, handler) {
   socketClient.on(event, handler);
@@ -24,6 +27,7 @@ function onSocket(event, handler) {
  */
 export function renderWaitingRoom(navigate) {
   cleanupWaitingListeners(); // Remove old listeners before re-registering
+  currentNavigate = navigate;
   const app = document.getElementById('app');
   app.innerHTML = '';
 
@@ -162,6 +166,8 @@ export function renderWaitingRoom(navigate) {
   backBtn.textContent = '← Leave Room';
   backBtn.style.marginTop = 'var(--space-md)';
   backBtn.addEventListener('click', () => {
+    cleanupWaitingListeners();
+    socketClient.emit('leave-room', null, () => {});
     clientState.clearSession();
     clientState.reset();
     navigate('lobby');
@@ -236,7 +242,11 @@ function renderPlayerCards(container) {
       removeBtn.title = 'Remove bot';
       removeBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        socketClient.emit('remove-bot', { botId: player.id });
+        socketClient.emit('remove-bot', { botId: player.id }, (res) => {
+          if (!res?.success) {
+            showToast(res?.error || 'Could not remove bot', { type: 'warning' });
+          }
+        });
       });
       card.appendChild(removeBtn);
     }
@@ -265,6 +275,12 @@ function renderPlayerCards(container) {
 }
 
 function updateWaitingRoom() {
+  // If host status transferred to this player and host controls are missing, re-render
+  if (clientState.isHost && !document.getElementById('start-game-btn') && currentNavigate) {
+    renderWaitingRoom(currentNavigate);
+    return;
+  }
+
   const grid = document.getElementById('players-grid');
   if (grid) renderPlayerCards(grid);
 

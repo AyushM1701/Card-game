@@ -39,11 +39,17 @@ export function createSeat(player, angle, isCurrentTurn, onCardClick = null) {
     for (let i = 0; i < 3; i++) {
       const cardEl = createCardBack({ interactive: canInteract });
       cardEl.dataset.slotIndex = i;
+      cardEl.title = `Slot #${i + 1}`;
       if (canInteract && onCardClick) {
         cardEl.style.cursor = 'pointer';
         cardEl.classList.add('card-swappable');
         cardEl.addEventListener('click', () => onCardClick(i));
       }
+      const slotBadge = document.createElement('div');
+      slotBadge.className = 'card-slot-badge';
+      slotBadge.textContent = `#${i + 1}`;
+      cardEl.appendChild(slotBadge);
+
       cardFan.appendChild(cardEl);
     }
   } else {
@@ -51,6 +57,13 @@ export function createSeat(player, angle, isCurrentTurn, onCardClick = null) {
     for (let i = 0; i < 3; i++) {
       const cardEl = createCardBack();
       cardEl.dataset.slotIndex = i;
+      cardEl.title = `Slot #${i + 1}`;
+
+      const slotBadge = document.createElement('div');
+      slotBadge.className = 'card-slot-badge';
+      slotBadge.textContent = `#${i + 1}`;
+      cardEl.appendChild(slotBadge);
+
       cardFan.appendChild(cardEl);
     }
   }

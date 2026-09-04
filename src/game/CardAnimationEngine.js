@@ -78,7 +78,7 @@ class CardAnimationEngine {
 
     // Trigger flip during flight if faceUp is requested
     if (faceUp) {
-      setTimeout(() => {
+      this._setTimeout(() => {
         flyer.classList.add('flipped');
       }, duration * 0.3);
     }
@@ -91,7 +91,7 @@ class CardAnimationEngine {
       flyer.style.transform = `translate(-50%, -50%) scale(1.05) rotate(${(Math.random() - 0.5) * 15}deg)`;
     });
 
-    setTimeout(() => {
+    this._setTimeout(() => {
       flyer.remove();
       onComplete?.();
     }, duration + 30);
@@ -169,7 +169,7 @@ class CardAnimationEngine {
     badge.className = `slot-action-badge badge-${type}`;
     badge.textContent = text;
     targetEl.appendChild(badge);
-    setTimeout(() => badge.remove(), 1900);
+    this._setTimeout(() => badge.remove(), 1900);
   }
 
   /**
@@ -187,7 +187,7 @@ class CardAnimationEngine {
       slotEl.classList.add('slot-card-replaced');
       const slotLabel = ['#1 Left', '#2 Mid', '#3 Right'][slotIndex] || `#${(slotIndex ?? 0) + 1}`;
       this._spawnSlotBadge(slotEl, `🔄 SWAP ${slotLabel}`, 'swap');
-      setTimeout(() => {
+      this._setTimeout(() => {
         slotEl.classList.remove('slot-card-replaced');
       }, 1400);
     }
@@ -270,9 +270,9 @@ class CardAnimationEngine {
 
     const details = {
       'peek-own': `${sourceName} is peeking at their own cards`,
-      'peek-opponent': `${sourceName} is peeking at all of ${targetName}'s cards`,
-      'blind-trade': `${sourceName} traded ${sSlot} with ${targetName}'s ${tSlot}`,
-      'scramble': `${sourceName} scrambled all of ${targetName}'s cards!`
+      'peek-opponent': targetName ? `${sourceName} is peeking at all of ${targetName}'s cards` : `${sourceName} is choosing an opponent to peek`,
+      'blind-trade': targetName ? `${sourceName} traded ${sSlot} with ${targetName}'s ${tSlot}` : `${sourceName} is initiating a Blind Trade`,
+      'scramble': targetName ? `${sourceName} scrambled all of ${targetName}'s cards!` : `${sourceName} is choosing an opponent to scramble`
     };
 
     const titleEl = document.createElement('div');
@@ -288,9 +288,9 @@ class CardAnimationEngine {
 
     layer.appendChild(banner);
 
-    setTimeout(() => {
+    this._setTimeout(() => {
       banner.classList.add('banner-exit');
-      setTimeout(() => banner.remove(), 400);
+      this._setTimeout(() => banner.remove(), 400);
     }, 2400);
   }
 
@@ -299,7 +299,7 @@ class CardAnimationEngine {
     halo.className = 'king-royal-halo';
     seatEl.appendChild(halo);
 
-    setTimeout(() => {
+    this._setTimeout(() => {
       halo.remove();
     }, 2500);
   }
@@ -328,10 +328,10 @@ class CardAnimationEngine {
     const targetFan = targetEl.querySelector('.card-fan');
     if (targetFan) {
       targetFan.classList.add('queen-targeted-fan');
-      setTimeout(() => targetFan.classList.remove('queen-targeted-fan'), 2000);
+      this._setTimeout(() => targetFan.classList.remove('queen-targeted-fan'), 2000);
     }
 
-    setTimeout(() => beam.remove(), 1600);
+    this._setTimeout(() => beam.remove(), 1600);
   }
 
   _renderJackTrade(sourcePlayerId, targetPlayerId, sourceSlot = null, targetSlot = null) {
@@ -354,13 +354,13 @@ class CardAnimationEngine {
     if (sourceEl.classList.contains('card')) {
       sourceEl.classList.add('slot-card-traded');
       this._spawnSlotBadge(sourceEl, `🔄 GIVING ${sLabel}`, 'trade');
-      setTimeout(() => sourceEl.classList.remove('slot-card-traded'), 1600);
+      this._setTimeout(() => sourceEl.classList.remove('slot-card-traded'), 1600);
     }
 
     if (targetEl.classList.contains('card')) {
       targetEl.classList.add('slot-card-traded');
       this._spawnSlotBadge(targetEl, `🔄 GETTING ${tLabel}`, 'trade');
-      setTimeout(() => targetEl.classList.remove('slot-card-traded'), 1600);
+      this._setTimeout(() => targetEl.classList.remove('slot-card-traded'), 1600);
     }
 
     // Two card spirits flying in arcing paths directly between the two specific card slots
@@ -388,7 +388,7 @@ class CardAnimationEngine {
       card2.style.top = `${sRect.top + sRect.height / 2}px`;
     });
 
-    setTimeout(() => {
+    this._setTimeout(() => {
       card1.remove();
       card2.remove();
     }, 900);
@@ -407,7 +407,7 @@ class CardAnimationEngine {
       vortex.className = 'scramble-vortex';
       fan.appendChild(vortex);
 
-      setTimeout(() => {
+      this._setTimeout(() => {
         fan.classList.remove('card-scrambling-wild');
         vortex.remove();
       }, 1500);

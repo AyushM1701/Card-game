@@ -1,6 +1,7 @@
 // server/RoomManager.js — Room lifecycle & player management
 
 import { v4 as uuidv4 } from 'uuid';
+import { randomInt } from 'crypto';
 
 class RoomManager {
   constructor() {
@@ -19,7 +20,7 @@ class RoomManager {
     do {
       code = '';
       for (let i = 0; i < 6; i++) {
-        code += chars[Math.floor(Math.random() * chars.length)];
+        code += chars[randomInt(chars.length)];
       }
     } while (this.rooms.has(code));
     return code;
@@ -82,10 +83,13 @@ class RoomManager {
       isBot: false
     };
 
+    const cleanMaxPlayers = Number.isFinite(Number(maxPlayers)) ? Math.min(Math.max(Number(maxPlayers), 2), 10) : 4;
+    const cleanTotalRounds = Number.isFinite(Number(totalRounds)) ? Math.min(Math.max(Number(totalRounds), 1), 10) : 1;
+
     const room = {
       code,
-      maxPlayers: Math.min(Math.max(maxPlayers, 2), 10),
-      totalRounds: Math.min(Math.max(totalRounds || 1, 1), 10),
+      maxPlayers: cleanMaxPlayers,
+      totalRounds: cleanTotalRounds,
       players: [host],
       spectators: [],
       hostId: host.id,
@@ -103,7 +107,7 @@ class RoomManager {
    * Add a bot to a waiting room
    */
   addBot(code, botName) {
-    const room = this.rooms.get(code.toUpperCase());
+    const room = this.rooms.get(code?.toUpperCase());
     if (!room || room.status !== 'waiting') return null;
     if (room.players.length >= room.maxPlayers) return null;
 
@@ -125,7 +129,7 @@ class RoomManager {
    * Remove a bot from a waiting room
    */
   removeBot(code, botId) {
-    const room = this.rooms.get(code.toUpperCase());
+    const room = this.rooms.get(code?.toUpperCase());
     if (!room || room.status !== 'waiting') return false;
 
     const idx = room.players.findIndex(p => p.id === botId && p.isBot);
@@ -160,7 +164,7 @@ class RoomManager {
     if (playerId) {
       const existingPlayer = room.players.find(p => p.id === playerId);
       if (existingPlayer) {
-        if (existingPlayer.reconnectToken && reconnectToken && existingPlayer.reconnectToken !== reconnectToken) {
+        if (existingPlayer.reconnectToken && existingPlayer.reconnectToken !== reconnectToken) {
           return { success: false, error: 'Unauthorized reconnection attempt.' };
         }
         existingPlayer.socketId = socketId;
@@ -175,7 +179,7 @@ class RoomManager {
     // If game is in progress or room is full, join as spectator
     if (room.status === 'playing' || room.players.length >= room.maxPlayers) {
       const spectator = {
-        id: playerId || uuidv4(),
+        id: uuidv4(),  // Always generate fresh ID — never reuse client-provided playerId for spectators
         reconnectToken: uuidv4(),
         name: cleanPlayerName,
         socketId,
@@ -193,7 +197,7 @@ class RoomManager {
     }
 
     const player = {
-      id: playerId || uuidv4(),
+      id: uuidv4(),
       reconnectToken: uuidv4(),
       name: cleanPlayerName,
       socketId,
@@ -204,7 +208,7 @@ class RoomManager {
     };
 
     room.players.push(player);
-    this.socketToRoom.set(socketId, code);
+    this.socketToRoom.set(socketId, room.code);
     return { success: true, room, player, isSpectator: false };
   }
 
@@ -215,7 +219,7 @@ class RoomManager {
     const code = this.socketToRoom.get(socketId);
     if (!code) return null;
 
-    const room = this.rooms.get(code);
+    const room = this.rooms.get(code?.toUpperCase());
     if (!room) return null;
 
     // Check spectators
@@ -266,7 +270,7 @@ class RoomManager {
 
     const player = room.players.find(p => p.id === playerId);
     if (player) {
-      if (player.reconnectToken && reconnectToken && player.reconnectToken !== reconnectToken) {
+      if (player.reconnectToken && player.reconnectToken !== reconnectToken) {
         return null;
       }
       player.socketId = newSocketId;
@@ -278,7 +282,7 @@ class RoomManager {
 
     const spectator = room.spectators?.find(s => s.id === playerId);
     if (spectator) {
-      if (spectator.reconnectToken && reconnectToken && spectator.reconnectToken !== reconnectToken) {
+      if (spectator.reconnectToken && spectator.reconnectToken !== reconnectToken) {
         return null;
       }
       spectator.socketId = newSocketId;
@@ -303,7 +307,7 @@ class RoomManager {
    */
   getRoomBySocket(socketId) {
     const code = this.socketToRoom.get(socketId);
-    return code ? this.rooms.get(code) : null;
+    return code ? this.rooms.get(code?.toUpperCase()) : null;
   }
 
   /**

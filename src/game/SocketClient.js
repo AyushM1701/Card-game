@@ -50,6 +50,11 @@ class SocketClient {
       console.error('[Socket] Connection error:', err.message);
       this._emit('_error', err);
     });
+
+    this.socket.on('error', (err) => {
+      console.error('[Socket] Socket error:', err?.message || err);
+      this._emit('_error', err);
+    });
   }
 
   /**

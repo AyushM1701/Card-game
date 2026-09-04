@@ -69,6 +69,11 @@ export function renderLobbyScreen(navigate) {
   nameInput.placeholder = 'Enter your display name';
   nameInput.maxLength = 20;
   nameInput.value = localStorage.getItem('undercut_name') || '';
+  nameInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      document.getElementById('create-game-btn')?.click();
+    }
+  });
   form.appendChild(nameLabel);
   form.appendChild(nameInput);
 
@@ -198,6 +203,8 @@ export function renderLobbyScreen(navigate) {
       return;
     }
 
+    clientState.clearSession();
+    clientState.reset();
     localStorage.setItem('undercut_name', name);
     clientState.playerName = name;
     clientState.maxPlayers = maxPlayers;
@@ -211,7 +218,7 @@ export function renderLobbyScreen(navigate) {
       createBtn.textContent = '🎲 Create Game';
 
       if (res.success) {
-        clientState.setRoom(res.roomCode, res.playerId, res.players, true, false, res.totalRounds || totalRounds, res.reconnectToken);
+        clientState.setRoom(res.roomCode, res.playerId, res.players, true, false, res.totalRounds || totalRounds, res.reconnectToken, res.maxPlayers);
         navigate('waiting');
       } else {
         showToast(res.error || 'Failed to create game', { type: 'error' });
@@ -255,6 +262,12 @@ export function renderLobbyScreen(navigate) {
     let val = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
     if (val.length > 6) val = val.substring(0, 6);
     codeInput.value = val;
+  });
+
+  codeInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      document.getElementById('join-game-btn')?.click();
+    }
   });
 
   // 1-Tap Paste Button (especially handy for mobile/touch)
@@ -333,9 +346,9 @@ export function renderLobbyScreen(navigate) {
 
       if (res.success) {
         if (res.gameView) {
-          clientState.resumeGame(res.roomCode, res.playerId, res.players, res.isHost, res.isSpectator, res.totalRounds, res.gameView, res.reconnectToken || savedToken);
+          clientState.resumeGame(res.roomCode, res.playerId, res.players, res.isHost, res.isSpectator, res.totalRounds, res.gameView, res.reconnectToken || savedToken, res.maxPlayers);
         } else {
-          clientState.setRoom(res.roomCode, res.playerId, res.players, res.isHost || false, res.isSpectator, res.totalRounds, res.reconnectToken || savedToken);
+          clientState.setRoom(res.roomCode, res.playerId, res.players, res.isHost || false, res.isSpectator, res.totalRounds, res.reconnectToken || savedToken, res.maxPlayers);
         }
         if (res.isSpectator) {
           showToast(`Joined as spectator (${res.spectatorCount || 1} watching)`, { type: 'info', icon: '👁️' });

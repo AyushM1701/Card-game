@@ -85,3 +85,42 @@ test('BotEngine — Scramble Wipes Target Memory', () => {
   // Memory must be wiped to [null, null, null]
   assert.deepEqual(botEngine.getMemory(roomCode, targetId), [null, null, null]);
 });
+
+test('BotEngine — Sets roundOverEmitted flag when draw pile runs dry on bot turn', async () => {
+  const gm = new GameManager();
+  const rm = new RoomManager();
+  const room = rm.createRoom('HumanAlice', 'sock_1', 4, 1);
+  const humanId = room.players[0].id;
+  const bot = rm.addBot(room.code, 'BotDrawer');
+  const botId = bot.id;
+
+  const gameState = gm.startGame(room);
+  botEngine.initRoom(room.code, gameState);
+  gm.markPeekDone(room.code, humanId);
+  gm.markPeekDone(room.code, botId);
+
+  // Advance turn to the bot
+  gameState.currentPlayerIndex = gameState.playerOrder.indexOf(botId);
+  // Empty the draw pile
+  gameState.drawPile = [];
+  gameState.roundOverEmitted = false;
+
+  const emittedEvents = [];
+  const mockIo = {
+    to: (targetRoom) => ({
+      emit: (evt, payload) => {
+        emittedEvents.push({ targetRoom, evt, payload });
+      }
+    })
+  };
+  const mockEmitTurnChange = () => {};
+
+  await botEngine.processBotTurn(room.code, botId, gm, rm, mockIo, mockEmitTurnChange);
+
+  assert.equal(gameState.phase, 'round_over');
+  assert.equal(gameState.roundOverEmitted, true);
+  const roundOverEvent = emittedEvents.find(e => e.evt === 'round-over');
+  assert.ok(roundOverEvent);
+  assert.ok(roundOverEvent.payload.results);
+});
+

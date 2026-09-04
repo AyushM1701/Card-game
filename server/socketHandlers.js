@@ -3,6 +3,8 @@
 import { isActionCard, getActionType } from './Deck.js';
 import botEngine from './BotEngine.js';
 
+const abandonmentTimers = new Map(); // roomCode -> timeoutId
+
 /**
  * Wire up all socket events.
  * @param {import('socket.io').Server} io
@@ -10,6 +12,43 @@ import botEngine from './BotEngine.js';
  * @param {import('./GameManager.js').default} gameManager
  */
 export default function setupSocketHandlers(io, roomManager, gameManager) {
+  function startPeekPhase(room, gameState) {
+    botEngine.initRoom(room.code, gameState);
+
+    // Auto-mark peek done for bots and any currently disconnected human players
+    for (const p of room.players) {
+      if (p.isBot || !p.connected) {
+        gameManager.markPeekDone(room.code, p.id);
+      }
+    }
+
+    // Authoritative 10-second timer to advance peek phase even if a client hangs/drops
+    if (gameState.peekTimer) clearTimeout(gameState.peekTimer);
+    gameState.peekTimer = setTimeout(() => {
+      gameState.peekTimer = null;
+      const g = gameManager.getGame(room.code);
+      if (g && g.phase === 'peek_phase') {
+        console.log(`[Game] Authoritative peek timeout reached in room ${room.code} — auto-advancing`);
+        for (const pid of g.playerOrder) {
+          gameManager.markPeekDone(room.code, pid);
+        }
+        const startPid = gameManager.getCurrentPlayerId(room.code);
+        io.to(room.code).emit('peek-phase-complete', {
+          currentPlayerId: startPid
+        });
+
+        const startingPlayer = room.players.find(p => p.id === startPid);
+        if (startingPlayer && startingPlayer.isBot) {
+          botEngine.processBotTurn(room.code, startPid, gameManager, roomManager, io, (ioInstance, code, gmMgr) => {
+            emitTurnChange(ioInstance, code, gmMgr, roomManager);
+          });
+        } else {
+          emitTurnChange(io, room.code, gameManager, roomManager);
+        }
+      }
+    }, 10000);
+  }
+
   io.on('connection', (socket) => {
     console.log(`[Socket] Connected: ${socket.id}`);
 
@@ -20,17 +59,18 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
         const room = roomManager.createRoom(playerName, socket.id, maxPlayers, totalRounds);
         socket.join(room.code);
         const player = room.players[0];
-        callback({
+        callback?.({
           success: true,
           roomCode: room.code,
           playerId: player.id,
           reconnectToken: player.reconnectToken,
           totalRounds: room.totalRounds,
+          maxPlayers: room.maxPlayers,
           players: roomManager.getPlayerList(room)
         });
         console.log(`[Room] ${playerName} created room ${room.code} (max ${room.maxPlayers} players, ${room.totalRounds} rounds)`);
       } catch (err) {
-        callback({ success: false, error: err.message });
+        callback?.({ success: false, error: err.message });
       }
     });
 
@@ -78,10 +118,16 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
     socket.on('join-room', ({ roomCode, playerName, playerId, reconnectToken }, callback) => {
       const result = roomManager.joinRoom(roomCode, playerName, socket.id, playerId, reconnectToken);
       if (!result.success) {
-        callback({ success: false, error: result.error });
+        callback?.({ success: false, error: result.error });
         return;
       }
       socket.join(result.room.code);
+
+      if (abandonmentTimers.has(result.room.code)) {
+        clearTimeout(abandonmentTimers.get(result.room.code));
+        abandonmentTimers.delete(result.room.code);
+        console.log(`[Room] Human joined room ${result.room.code} — cancelled abandonment timer`);
+      }
 
       const game = gameManager.getGame(result.room.code);
       if (result.isReconnect && game?.turnTimer) {
@@ -94,7 +140,7 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
         gameView = gameManager.getPlayerView(result.room.code, result.player.id);
       }
 
-      callback({
+      callback?.({
         success: true,
         roomCode: result.room.code,
         playerId: result.player.id,
@@ -103,6 +149,7 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
         isSpectator: !!result.isSpectator,
         status: result.room.status,
         totalRounds: result.room.totalRounds,
+        maxPlayers: result.room.maxPlayers,
         spectatorCount: roomManager.getSpectatorCount(result.room),
         players: roomManager.getPlayerList(result.room),
         gameView
@@ -159,6 +206,12 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
       const { room, player, isSpectator } = result;
       socket.join(room.code);
 
+      if (abandonmentTimers.has(room.code)) {
+        clearTimeout(abandonmentTimers.get(room.code));
+        abandonmentTimers.delete(room.code);
+        console.log(`[Room] Human reconnected to room ${room.code} — cancelled abandonment timer`);
+      }
+
       const game = gameManager.getGame(room.code);
       if (game?.turnTimer) {
         clearTimeout(game.turnTimer);
@@ -180,6 +233,7 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
         isSpectator: !!isSpectator,
         status: room.status,
         totalRounds: room.totalRounds,
+        maxPlayers: room.maxPlayers,
         spectatorCount: roomManager.getSpectatorCount(room),
         players: roomManager.getPlayerList(room),
         gameView
@@ -226,15 +280,7 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
       const gameState = gameManager.startGame(room);
       room.gameState = gameState;
 
-      // Initialize bot memory
-      botEngine.initRoom(room.code, gameState);
-
-      // Auto-mark peek done for bots
-      for (const p of room.players) {
-        if (p.isBot) {
-          gameManager.markPeekDone(room.code, p.id);
-        }
-      }
+      startPeekPhase(room, gameState);
 
       // Send each human player their own cards for the peek phase
       for (const p of room.players) {
@@ -290,14 +336,7 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
         return;
       }
 
-      botEngine.initRoom(room.code, gameState);
-
-      // Auto-mark peek done for bots
-      for (const p of room.players) {
-        if (p.isBot) {
-          gameManager.markPeekDone(room.code, p.id);
-        }
-      }
+      startPeekPhase(room, gameState);
 
       for (const p of room.players) {
         if (!p.isBot && p.socketId) {
@@ -336,16 +375,53 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
       callback?.({ success: true });
     });
 
+    // ─── Request Rematch (Issue 4) ─────────────────────────────
+
+    socket.on('request-rematch', (_, callback) => {
+      const room = roomManager.getRoomBySocket(socket.id);
+      const player = roomManager.getPlayerBySocket(socket.id);
+      if (!room || !player || !player.isHost) {
+        callback?.({ success: false, error: 'Only host can request a rematch' });
+        return;
+      }
+
+      // Purge disconnected players before returning to waiting room
+      room.players = room.players.filter(p => p.connected || p.isBot);
+      room.players.forEach((p, i) => { p.seatIndex = i; });
+
+      room.status = 'waiting';
+      room.gameState = null;
+      gameManager.removeGame(room.code);
+      botEngine.clearRoom(room.code);
+
+      console.log(`[Room] Host requested rematch in room ${room.code} — returning players to waiting room`);
+
+      io.to(room.code).emit('room-rematch-started', {
+        roomCode: room.code,
+        players: roomManager.getPlayerList(room),
+        totalRounds: room.totalRounds,
+        maxPlayers: room.maxPlayers
+      });
+
+      callback?.({ success: true });
+    });
+
     // ─── Peek Phase ────────────────────────────────────────────
 
     socket.on('peek-done', () => {
       const room = roomManager.getRoomBySocket(socket.id);
       const player = roomManager.getPlayerBySocket(socket.id);
-      if (!room || !player) return;
+      if (!room || !player || player.isSpectator) return;
 
       const allDone = gameManager.markPeekDone(room.code, player.id);
 
       if (allDone) {
+        const game = gameManager.getGame(room.code);
+        if (game?.peekTimer) {
+          clearTimeout(game.peekTimer);
+          game.peekTimer = null;
+        }
+
         const startPid = gameManager.getCurrentPlayerId(room.code);
         io.to(room.code).emit('peek-phase-complete', {
           currentPlayerId: startPid
@@ -357,6 +433,8 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
           botEngine.processBotTurn(room.code, startPid, gameManager, roomManager, io, (ioInstance, code, gmMgr) => {
             emitTurnChange(ioInstance, code, gmMgr, roomManager);
           });
+        } else {
+          emitTurnChange(io, room.code, gameManager, roomManager);
         }
       }
     });
@@ -368,6 +446,10 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
       const player = roomManager.getPlayerBySocket(socket.id);
       if (!room || !player) {
         callback?.({ success: false, error: 'Not in a room' });
+        return;
+      }
+      if (player.isSpectator) {
+        callback?.({ success: false, error: 'Spectators cannot draw cards' });
         return;
       }
 
@@ -411,7 +493,14 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
     socket.on('swap-card', ({ slotIndex }, callback) => {
       const room = roomManager.getRoomBySocket(socket.id);
       const player = roomManager.getPlayerBySocket(socket.id);
-      if (!room || !player) return;
+      if (!room || !player) {
+        callback?.({ success: false, error: 'Not in a room' });
+        return;
+      }
+      if (player.isSpectator) {
+        callback?.({ success: false, error: 'Spectators cannot swap cards' });
+        return;
+      }
 
       const parsedSlot = parseInt(slotIndex, 10);
       if (Number.isNaN(parsedSlot) || parsedSlot < 0 || parsedSlot > 2) {
@@ -468,7 +557,14 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
     socket.on('discard-drawn', (_, callback) => {
       const room = roomManager.getRoomBySocket(socket.id);
       const player = roomManager.getPlayerBySocket(socket.id);
-      if (!room || !player) return;
+      if (!room || !player) {
+        callback?.({ success: false, error: 'Not in a room' });
+        return;
+      }
+      if (player.isSpectator) {
+        callback?.({ success: false, error: 'Spectators cannot discard cards' });
+        return;
+      }
 
       const game = gameManager.getGame(room.code);
       const discardedCard = game?.drawnCard ? { ...game.drawnCard } : null;
@@ -492,19 +588,28 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
     socket.on('play-action-immediately', (_, callback) => {
       const room = roomManager.getRoomBySocket(socket.id);
       const player = roomManager.getPlayerBySocket(socket.id);
-      if (!room || !player) return;
+      if (!room || !player) {
+        callback?.({ success: false, error: 'Not in a room' });
+        return;
+      }
+      if (player.isSpectator) {
+        callback?.({ success: false, error: 'Spectators cannot play action cards' });
+        return;
+      }
 
       const result = gameManager.playActionImmediately(room.code, player.id);
       callback?.({
         success: result.success,
         actionType: result.actionType,
+        card: result.card,
         error: result.error
       });
 
       if (result.success) {
-        socket.to(room.code).emit('player-played-action', {
+        io.to(room.code).emit('player-played-action', {
           playerId: player.id,
-          actionType: result.actionType
+          actionType: result.actionType,
+          card: result.card
         });
 
         // Start action resolution timeout (30s) to prevent stalling on open action modal
@@ -574,6 +679,11 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
         return;
       }
 
+      if (!targetPlayerId || !room.players.some(p => p.id === targetPlayerId)) {
+        callback?.({ success: false, error: 'Invalid target player: player not in room' });
+        return;
+      }
+
       const cards = gameManager.resolvePeekOpponent(room.code, player.id, targetPlayerId);
       if (!cards) {
         callback?.({ success: false, error: 'Failed to resolve peek opponent' });
@@ -589,6 +699,12 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
           byPlayerId: player.id
         });
       }
+
+      // Broadcast to room so spectators and other players see scan animation
+      io.to(room.code).emit('player-peeked-opponent', {
+        sourcePlayerId: player.id,
+        targetPlayerId
+      });
 
       gameManager.finishActionAndAdvance(room.code);
       emitTurnChange(io, room.code, gameManager, roomManager);
@@ -615,6 +731,11 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
       const auth = _canResolveAction(game, player.id, 'blind-trade');
       if (!auth.allowed) {
         callback?.({ success: false, error: auth.error });
+        return;
+      }
+
+      if (!targetPlayerId || !room.players.some(p => p.id === targetPlayerId)) {
+        callback?.({ success: false, error: 'Invalid target player: player not in room' });
         return;
       }
 
@@ -653,6 +774,11 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
       const auth = _canResolveAction(game, player.id, 'scramble');
       if (!auth.allowed) {
         callback?.({ success: false, error: auth.error });
+        return;
+      }
+
+      if (!targetPlayerId || !room.players.some(p => p.id === targetPlayerId)) {
+        callback?.({ success: false, error: 'Invalid target player: player not in room' });
         return;
       }
 
@@ -697,6 +823,13 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
         return;
       }
 
+      if (['peek-opponent', 'blind-trade', 'scramble'].includes(actionType)) {
+        if (!targetPlayerId || !room.players.some(p => p.id === targetPlayerId)) {
+          callback?.({ success: false, error: 'Invalid target player: player not in room' });
+          return;
+        }
+      }
+
       let success = false;
       let data = {};
 
@@ -718,6 +851,10 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
                 byPlayerId: player.id
               });
             }
+            io.to(room.code).emit('player-peeked-opponent', {
+              sourcePlayerId: player.id,
+              targetPlayerId
+            });
           }
           break;
         }
@@ -770,6 +907,30 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
       emitTurnChange(io, room.code, gameManager, roomManager);
     });
 
+    // ─── Leave Room ───────────────────────────────────────────
+
+    socket.on('leave-room', (_, callback) => {
+      const result = roomManager.handleDisconnect(socket.id);
+      if (result) {
+        socket.leave(result.roomCode || '');
+        if (result.removed && result.roomCode) {
+          gameManager.removeGame(result.roomCode);
+          botEngine.clearRoom(result.roomCode);
+          if (abandonmentTimers.has(result.roomCode)) {
+            clearTimeout(abandonmentTimers.get(result.roomCode));
+            abandonmentTimers.delete(result.roomCode);
+          }
+        } else if (result.room) {
+          io.to(result.room.code).emit('player-disconnected', {
+            playerId: result.player.id,
+            playerName: result.player.name,
+            players: roomManager.getPlayerList(result.room)
+          });
+        }
+      }
+      callback?.({ success: true });
+    });
+
     // ─── Disconnect ────────────────────────────────────────────
 
     socket.on('disconnect', () => {
@@ -777,8 +938,34 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
       if (result) {
         if (result.removed && result.roomCode) {
           gameManager.removeGame(result.roomCode);
+          botEngine.clearRoom(result.roomCode);
+          if (abandonmentTimers.has(result.roomCode)) {
+            clearTimeout(abandonmentTimers.get(result.roomCode));
+            abandonmentTimers.delete(result.roomCode);
+          }
           console.log(`[Room] Room ${result.roomCode} removed and game state cleared (no human players left)`);
         } else if (result.room) {
+          const hasConnectedHumans = result.room.players.some(pl => !pl.isBot && pl.connected) || (result.room.spectators && result.room.spectators.length > 0);
+          if (!hasConnectedHumans) {
+            console.log(`[Room] Last human left room ${result.room.code} during play — scheduling abandonment teardown (15s)`);
+            if (abandonmentTimers.has(result.room.code)) {
+              clearTimeout(abandonmentTimers.get(result.room.code));
+            }
+            const timer = setTimeout(() => {
+              abandonmentTimers.delete(result.room.code);
+              const r = roomManager.getRoom(result.room.code);
+              const stillNoHumans = !r?.players.some(pl => !pl.isBot && pl.connected) && (!r?.spectators || r.spectators.length === 0);
+              if (stillNoHumans) {
+                console.log(`[Room] Abandonment timeout expired for room ${result.room.code} — tearing down`);
+                gameManager.removeGame(result.room.code);
+                botEngine.clearRoom(result.room.code);
+                roomManager.deleteRoom(result.room.code);
+              }
+            }, 15000);
+            abandonmentTimers.set(result.room.code, timer);
+            return;
+          }
+
           io.to(result.room.code).emit('player-disconnected', {
             playerId: result.player.id,
             playerName: result.player.name,
@@ -786,12 +973,36 @@ export default function setupSocketHandlers(io, roomManager, gameManager) {
           });
           console.log(`[Socket] ${result.player.name} disconnected from room ${result.room.code}`);
 
-          // If game is active and it is currently the disconnected player's turn, trigger grace-period auto-skip
+          // If game is active, check peek phase auto-advance or turn-timer auto-skip
           const game = gameManager.getGame(result.room.code);
           if (game && result.room.status === 'playing') {
-            const currentPid = game.playerOrder[game.currentPlayerIndex];
-            if (currentPid === result.player.id && !game.turnTimer) {
-              emitTurnChange(io, result.room.code, gameManager, roomManager);
+            if (game.phase === 'peek_phase') {
+              const allDone = gameManager.markPeekDone(result.room.code, result.player.id);
+              if (allDone) {
+                if (game.peekTimer) {
+                  clearTimeout(game.peekTimer);
+                  game.peekTimer = null;
+                }
+                const startPid = gameManager.getCurrentPlayerId(result.room.code);
+                io.to(result.room.code).emit('peek-phase-complete', {
+                  currentPlayerId: startPid
+                });
+                const startingPlayer = result.room.players.find(p => p.id === startPid);
+                if (startingPlayer && startingPlayer.isBot) {
+                  botEngine.processBotTurn(result.room.code, startPid, gameManager, roomManager, io, (ioInstance, code, gmMgr) => {
+                    emitTurnChange(ioInstance, code, gmMgr, roomManager);
+                  });
+                } else {
+                  emitTurnChange(io, result.room.code, gameManager, roomManager);
+                }
+              }
+            } else {
+              const currentPid = game.playerOrder[game.currentPlayerIndex];
+              if (currentPid === result.player.id) {
+                if (game.turnTimer) clearTimeout(game.turnTimer);
+                game.turnTimer = null;
+                emitTurnChange(io, result.room.code, gameManager, roomManager);
+              }
             }
           }
         }
@@ -850,6 +1061,15 @@ function emitTurnChange(io, roomCode, gameManager, roomManager) {
       io.to(roomCode).emit('round-over', { results });
     }
   } else {
+    const hasConnectedHumans = room?.players.some(pl => !pl.isBot && pl.connected) || (room?.spectators && room.spectators.length > 0);
+    if (!hasConnectedHumans && !abandonmentTimers.has(roomCode)) {
+      console.log(`[Game] No human players or spectators connected in room ${roomCode} — tearing down abandoned room and game`);
+      gameManager.removeGame(roomCode);
+      botEngine.clearRoom(roomCode);
+      roomManager?.deleteRoom(roomCode);
+      return;
+    }
+
     const currentPid = game.playerOrder[game.currentPlayerIndex];
     io.to(roomCode).emit('turn-change', {
       currentPlayerId: currentPid,
@@ -889,6 +1109,7 @@ function emitTurnChange(io, roomCode, gameManager, roomManager) {
         if (!hasConnectedHumans) {
           console.log(`[Game] All human players disconnected in room ${roomCode} — tearing down abandoned room and game`);
           gameManager.removeGame(roomCode);
+          botEngine.clearRoom(roomCode); // P1: clear bot memory to prevent leak
           roomManager.deleteRoom(roomCode);
           return;
         }

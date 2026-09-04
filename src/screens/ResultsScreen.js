@@ -5,6 +5,7 @@ import socketClient from '../game/SocketClient.js';
 import soundEngine from '../game/SoundEngine.js';
 import { createCard } from '../components/Card.js';
 import { formatCard } from '../game/CardUtils.js';
+import { cleanupListeners } from './GameScreen.js';
 
 /**
  * Render the results screen.
@@ -23,15 +24,30 @@ export function renderResultsScreen(navigate) {
     return;
   }
 
-  const results = Array.isArray(data) ? data : (data.playerResults || []);
   const isMatchOver = data.isMatchOver !== undefined ? data.isMatchOver : true;
   const isMultiRound = clientState.totalRounds > 1;
 
-  const roundWinner = results[0];
-  const isWinnerMe = roundWinner && roundWinner.playerId === clientState.playerId;
+  const rawResults = Array.isArray(data) ? data : (data.playerResults || []);
+  const results = [...rawResults].sort((a, b) => {
+    if (isMatchOver && isMultiRound) {
+      return (a.cumulativeScore ?? 0) - (b.cumulativeScore ?? 0);
+    }
+    return (a.roundTotal ?? a.total ?? 0) - (b.roundTotal ?? b.total ?? 0);
+  });
+
+  const minRoundTotal = rawResults.length > 0
+    ? Math.min(...rawResults.map(r => r.roundTotal ?? r.total ?? 0))
+    : 0;
+  const roundWinners = rawResults.filter(r => (r.roundTotal ?? r.total ?? 0) === minRoundTotal);
+  const isWinnerMe = roundWinners.some(w => w.playerId === clientState.playerId);
+
+  // Find overall match winner (lowest cumulative score)
+  const minCumScore = results.length > 0 ? Math.min(...results.map(r => r.cumulativeScore ?? 0)) : 0;
+  const matchWinners = results.filter(w => (w.cumulativeScore ?? 0) === minCumScore);
+  const isMatchWinnerMe = matchWinners.some(w => w.playerId === clientState.playerId);
 
   // Play sound
-  if (isWinnerMe) {
+  if ((isMultiRound && isMatchOver) ? isMatchWinnerMe : isWinnerMe) {
     soundEngine.roundWin();
   } else {
     soundEngine.roundLose();
@@ -41,21 +57,22 @@ export function renderResultsScreen(navigate) {
   const title = document.createElement('h1');
   title.className = 'results-title';
   if (isMultiRound && isMatchOver) {
-    // Find overall match winner (lowest cumulative score)
-    const sortedOverall = [...results].sort((a, b) => a.cumulativeScore - b.cumulativeScore);
-    const matchWinner = sortedOverall[0];
-    const isMatchWinnerMe = matchWinner.playerId === clientState.playerId;
-
     if (isMatchWinnerMe) {
-      title.innerHTML = '<span class="shimmer-text">👑 MATCH CHAMPION! YOU WIN!</span>';
+      title.innerHTML = matchWinners.length > 1
+        ? '<span class="shimmer-text">👑 TIED MATCH CHAMPIONS! YOU WIN!</span>'
+        : '<span class="shimmer-text">👑 MATCH CHAMPION! YOU WIN!</span>';
     } else {
-      title.textContent = `👑 ${clientState.getPlayerName(matchWinner.playerId)} Wins the Match!`;
+      const winnerNames = matchWinners.map(w => clientState.getPlayerName(w.playerId)).join(' & ');
+      title.textContent = `👑 ${winnerNames} Wins the Match!`;
       title.style.color = 'var(--gold)';
     }
   } else if (isWinnerMe) {
-    title.innerHTML = '<span class="shimmer-text">🏆 You Win The Round!</span>';
+    title.innerHTML = roundWinners.length > 1
+      ? '<span class="shimmer-text">🏆 You Tied for the Round Win!</span>'
+      : '<span class="shimmer-text">🏆 You Win The Round!</span>';
   } else {
-    title.textContent = `🏆 ${clientState.getPlayerName(roundWinner.playerId)} Wins Round ${clientState.roundNumber}!`;
+    const winnerNames = roundWinners.map(w => clientState.getPlayerName(w.playerId)).join(' & ');
+    title.textContent = `🏆 ${winnerNames} Wins Round ${clientState.roundNumber}!`;
     title.style.color = 'var(--text-primary)';
   }
   screen.appendChild(title);
@@ -96,11 +113,22 @@ export function renderResultsScreen(navigate) {
 
   results.forEach((result, index) => {
     const tr = document.createElement('tr');
-    if (result.isWinner) tr.className = 'winner';
+    const isChampion = isMatchOver && isMultiRound && (result.cumulativeScore ?? 0) === minCumScore;
+    const isRoundWinner = (!isMatchOver || !isMultiRound) && (result.isWinner || (result.roundTotal ?? result.total ?? 0) === minRoundTotal);
+    const isWinner = isChampion || isRoundWinner;
+    if (isWinner) tr.className = 'winner';
     tr.style.animation = `fadeInUp 0.5s var(--ease-out) ${index * 150}ms both`;
 
     const rankTd = document.createElement('td');
-    rankTd.textContent = result.isWinner ? '🥇' : `${index + 1}`;
+    if (isChampion) {
+      rankTd.textContent = '👑';
+      rankTd.title = 'Champion';
+    } else if (isRoundWinner) {
+      rankTd.textContent = '🥇';
+      rankTd.title = 'Round Winner';
+    } else {
+      rankTd.textContent = `${index + 1}`;
+    }
     rankTd.style.fontSize = 'var(--fs-lg)';
 
     const nameTd = document.createElement('td');
@@ -112,6 +140,13 @@ export function renderResultsScreen(navigate) {
       youBadge.className = 'you-badge';
       youBadge.textContent = 'YOU';
       nameTd.appendChild(youBadge);
+    }
+    if (isChampion) {
+      const champBadge = document.createElement('span');
+      champBadge.className = 'you-badge';
+      champBadge.style.cssText = 'background: hsla(43, 85%, 55%, 0.2); color: var(--gold); border-color: var(--gold); margin-left: 6px;';
+      champBadge.textContent = '👑 Champion';
+      nameTd.appendChild(champBadge);
     }
 
     const cardsTd = document.createElement('td');
@@ -189,46 +224,21 @@ export function renderResultsScreen(navigate) {
       playAgainBtn.textContent = '🔄 Play Again';
       playAgainBtn.addEventListener('click', () => {
         playAgainBtn.disabled = true;
-        playAgainBtn.textContent = 'Creating Room...';
+        playAgainBtn.textContent = 'Requesting Rematch...';
         soundEngine.cardShuffle();
-
-        const savedName = clientState.playerName || localStorage.getItem('undercut_name') || 'Player';
-        const savedMaxPlayers = clientState.maxPlayers || 4;
-        const savedTotalRounds = clientState.totalRounds || 1;
-
-        clientState.clearSession();
-        clientState.reset();
-
-        const createNew = () => {
-          socketClient.emit('create-room', {
-            playerName: savedName,
-            maxPlayers: savedMaxPlayers,
-            totalRounds: savedTotalRounds
-          }, (res) => {
-            if (res && res.success) {
-              clientState.setRoom(res.roomCode, res.playerId, res.players, true, false, res.totalRounds);
-              navigate('waiting');
-            } else {
-              navigate('lobby');
-            }
-          });
-        };
-
-        if (socketClient.connected) {
-          createNew();
-        } else {
-          socketClient.connect();
-          const onConnect = () => {
-            socketClient.off('_connected', onConnect);
-            createNew();
-          };
-          socketClient.on('_connected', onConnect);
-          setTimeout(() => {
-            if (!clientState.roomCode) navigate('lobby');
-          }, 4000);
-        }
+        socketClient.emit('request-rematch', null, (res) => {
+          if (!res?.success) {
+            playAgainBtn.disabled = false;
+            playAgainBtn.textContent = '🔄 Play Again';
+          }
+        });
       });
       actions.appendChild(playAgainBtn);
+    } else {
+      const waitNotice = document.createElement('div');
+      waitNotice.style.cssText = 'color:var(--text-muted);font-size:var(--fs-sm);align-self:center;';
+      waitNotice.textContent = 'Waiting for host to start rematch...';
+      actions.appendChild(waitNotice);
     }
   }
 
@@ -237,6 +247,8 @@ export function renderResultsScreen(navigate) {
   backBtn.textContent = '🏠 Back to Lobby';
   backBtn.addEventListener('click', () => {
     soundEngine.click();
+    cleanupListeners();
+    socketClient.emit('leave-room', null, () => {});
     clientState.clearSession();
     clientState.reset();
     navigate('lobby');

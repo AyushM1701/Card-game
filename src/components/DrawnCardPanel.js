@@ -3,6 +3,8 @@
 import { createCard } from './Card.js';
 import { isActionCard, getActionName } from '../game/CardUtils.js';
 
+let panelRemoveTimeout = null;
+
 /**
  * Create the drawn card decision panel.
  * @param {object} card - The drawn card
@@ -12,6 +14,15 @@ import { isActionCard, getActionName } from '../game/CardUtils.js';
  * @param {Function} onBankAction - (slotIndex) => void (only for action cards)
  */
 export function createDrawnCardPanel(card, { onSwap, onDiscard, onPlayAction, onBankAction }) {
+  if (panelRemoveTimeout) {
+    clearTimeout(panelRemoveTimeout);
+    panelRemoveTimeout = null;
+  }
+  const existing = document.getElementById('drawn-card-panel');
+  if (existing) {
+    existing.remove();
+  }
+
   const panel = document.createElement('div');
   panel.className = 'drawn-card-panel';
   panel.id = 'drawn-card-panel';
@@ -90,10 +101,17 @@ export function createDrawnCardPanel(card, { onSwap, onDiscard, onPlayAction, on
  * Remove the drawn card panel from the DOM.
  */
 export function removeDrawnCardPanel() {
+  if (panelRemoveTimeout) {
+    clearTimeout(panelRemoveTimeout);
+    panelRemoveTimeout = null;
+  }
   const panel = document.getElementById('drawn-card-panel');
   if (panel) {
     panel.style.animation = 'fadeOut 0.3s var(--ease-out) forwards';
-    setTimeout(() => panel.remove(), 300);
+    panelRemoveTimeout = setTimeout(() => {
+      panel.remove();
+      panelRemoveTimeout = null;
+    }, 300);
   }
 }
 

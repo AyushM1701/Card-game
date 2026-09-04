@@ -3,7 +3,6 @@
 class ClientState {
   constructor() {
     this.reset();
-    this._listeners = new Map();
   }
 
   reset() {
@@ -28,6 +27,8 @@ class ClientState {
     this.discardPile = [];
     this.drawnCard = null;
     this.roundNumber = 1;
+    this.peeksDoneCount = 0;
+    this.totalPeeksNeeded = 0;
     this.scores = {};
     this.isMatchOver = false;
 
@@ -39,39 +40,16 @@ class ClientState {
     this.peekTimerSeconds = 0;
   }
 
-  /**
-   * Subscribe to state changes.
-   */
-  on(event, handler) {
-    if (!this._listeners.has(event)) {
-      this._listeners.set(event, new Set());
-    }
-    this._listeners.get(event).add(handler);
-  }
-
-  off(event, handler) {
-    const handlers = this._listeners.get(event);
-    if (handlers) handlers.delete(handler);
-  }
-
-  _emit(event, data) {
-    const handlers = this._listeners.get(event);
-    if (handlers) {
-      handlers.forEach(h => {
-        try { h(data); } catch (e) { console.error(e); }
-      });
-    }
-  }
-
   // ─── Mutations ──────────────────────────────────────
 
-  setRoom(roomCode, playerId, players, isHost = false, isSpectator = false, totalRounds = 1, reconnectToken = null) {
+  setRoom(roomCode, playerId, players, isHost = false, isSpectator = false, totalRounds = 1, reconnectToken = null, maxPlayers = 4) {
     this.roomCode = roomCode;
     this.playerId = playerId;
     this.isHost = isHost;
     this.isSpectator = isSpectator;
     this.players = players || [];
     this.totalRounds = totalRounds || 1;
+    this.maxPlayers = maxPlayers || 4;
 
     const me = this.players.find(p => p.id === playerId);
     if (me) {
@@ -82,22 +60,23 @@ class ClientState {
     if (!isSpectator) {
       this.saveSession(roomCode, playerId, reconnectToken);
     }
-    this._emit('stateChange', { type: 'room-set' });
   }
 
-  resumeGame(roomCode, playerId, players, isHost = false, isSpectator = false, totalRounds = 1, gameView = null, reconnectToken = null) {
+  resumeGame(roomCode, playerId, players, isHost = false, isSpectator = false, totalRounds = 1, gameView = null, reconnectToken = null, maxPlayers = 4) {
     this.roomCode = roomCode;
     this.playerId = playerId;
     this.players = players || [];
     this.isHost = isHost;
     this.isSpectator = isSpectator;
     this.totalRounds = totalRounds || 1;
+    this.maxPlayers = maxPlayers || 4;
 
     const me = this.players.find(p => p.id === playerId);
     if (me) {
       this.playerName = me.name;
     }
 
+    // Save session once with the provided token (P1: removed duplicate call below)
     if (!isSpectator && reconnectToken) {
       this.saveSession(roomCode, playerId, reconnectToken);
     }
@@ -109,6 +88,8 @@ class ClientState {
       this.currentPlayerId = gameView.currentPlayerId;
       this.playerOrder = gameView.playerOrder || [];
       this.roundNumber = gameView.roundNumber || 1;
+      this.peeksDoneCount = gameView.peeksDoneCount || 0;
+      this.totalPeeksNeeded = gameView.totalPeeksNeeded || 0;
       this.scores = gameView.scores || {};
       this.myCards = gameView.myHand || [];
       this.knownCards = (gameView.myHand || []).map(c => (c ? { ...c } : null));
@@ -117,12 +98,6 @@ class ClientState {
     } else {
       this.screen = isSpectator ? 'game' : 'waiting';
     }
-
-    if (!isSpectator) {
-      this.saveSession(roomCode, playerId);
-    }
-
-    this._emit('stateChange', { type: 'game-resumed' });
   }
 
   updatePlayers(players) {
@@ -130,7 +105,6 @@ class ClientState {
     // Check if we're still host
     const me = players.find(p => p.id === this.playerId);
     if (me) this.isHost = me.isHost;
-    this._emit('stateChange', { type: 'players-updated' });
   }
 
   startGame(data) {
@@ -143,54 +117,53 @@ class ClientState {
     this.currentPlayerId = data.currentPlayerId;
     this.roundNumber = data.roundNumber || 1;
     this.totalRounds = data.totalRounds || this.totalRounds || 1;
+    this.discardPile = [];
+    this.drawnCard = null;
+    this.pendingAction = null;
+    this.roundResults = null;
     if (data.isSpectator !== undefined) this.isSpectator = data.isSpectator;
     if (data.scores) this.scores = { ...data.scores };
     this.screen = 'game';
-    this._emit('stateChange', { type: 'game-started' });
   }
 
   setPeekComplete(currentPlayerId) {
     this.phase = 'playing';
     this.currentPlayerId = currentPlayerId;
     this.peekCards = null;
-    this._emit('stateChange', { type: 'peek-complete' });
   }
 
   setDrawnCard(card) {
     this.drawnCard = card;
-    this._emit('stateChange', { type: 'card-drawn' });
   }
 
   clearDrawnCard() {
     this.drawnCard = null;
-    this._emit('stateChange', { type: 'drawn-card-cleared' });
   }
 
   updateTurn(currentPlayerId, drawPileCount) {
     this.currentPlayerId = currentPlayerId;
     if (drawPileCount !== undefined) this.drawPileCount = drawPileCount;
     this.drawnCard = null;
-    this._emit('stateChange', { type: 'turn-changed' });
   }
 
   updateDrawPile(count) {
     this.drawPileCount = count;
-    this._emit('stateChange', { type: 'draw-pile-updated' });
   }
 
   addToDiscard(card) {
     this.discardPile.push(card);
-    this._emit('stateChange', { type: 'discard-updated' });
+    if (this.discardPile.length > 5) {
+      this.discardPile = this.discardPile.slice(-5);
+    }
   }
 
   updateKnownCard(slotIndex, card) {
     this.knownCards[slotIndex] = card ? { ...card } : null;
-    this._emit('stateChange', { type: 'known-card-updated' });
   }
 
   setAllKnownCards(cards) {
     this.knownCards = (cards || []).map(c => c ? { ...c } : null);
-    this._emit('stateChange', { type: 'all-cards-peeked' });
+    this.myCards = (cards || []).map(c => c ? { ...c } : null);
   }
 
   // After a swap, we know the drawn card is now in the slot
@@ -201,29 +174,28 @@ class ClientState {
       this.myCards[slotIndex] = { ...newCard };
     }
     this.drawnCard = null;
-    this._emit('stateChange', { type: 'swap-recorded' });
   }
 
   // After a blind trade, we no longer know what's in that slot
   recordBlindTrade(mySlot) {
     this.knownCards[mySlot] = null; // Unknown now
-    this._emit('stateChange', { type: 'trade-recorded' });
+    if (this.myCards && this.myCards[mySlot] !== undefined) {
+      this.myCards[mySlot] = null;
+    }
   }
 
   // After a scramble on us, all positions are unknown
   recordScramble() {
     this.knownCards = [null, null, null];
-    this._emit('stateChange', { type: 'scramble-recorded' });
+    this.myCards = [null, null, null];
   }
 
   setPendingAction(action) {
     this.pendingAction = action;
-    this._emit('stateChange', { type: 'pending-action' });
   }
 
   clearPendingAction() {
     this.pendingAction = null;
-    this._emit('stateChange', { type: 'action-cleared' });
   }
 
   setRoundResults(data) {
@@ -244,8 +216,38 @@ class ClientState {
     if (this.isMatchOver) {
       this.clearSession();
     }
+  }
 
-    this._emit('stateChange', { type: 'round-over' });
+  resetForRematch(data) {
+    this.phase = null;
+    this.myCards = [];
+    this.knownCards = [null, null, null];
+    this.playerOrder = [];
+    this.currentPlayerId = null;
+    this.drawPileCount = 0;
+    this.discardPile = [];
+    this.drawnCard = null;
+    this.roundNumber = 1;
+    this.peeksDoneCount = 0;
+    this.totalPeeksNeeded = 0;
+    this.scores = {};
+    this.isMatchOver = false;
+    this.roundResults = null;
+    this.pendingAction = null;
+    this.peekCards = null;
+    this.peekTimerSeconds = 0;
+    this.screen = 'waiting';
+
+    if (data?.roomCode) this.roomCode = data.roomCode;
+    if (data?.players) this.players = data.players;
+    if (data?.totalRounds) this.totalRounds = data.totalRounds;
+    if (data?.maxPlayers) this.maxPlayers = data.maxPlayers;
+
+    const me = this.players.find(p => p.id === this.playerId);
+    if (me) {
+      this.isHost = !!me.isHost;
+      this.playerName = me.name;
+    }
   }
 
   /**

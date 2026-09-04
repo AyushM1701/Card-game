@@ -66,6 +66,13 @@ class BotEngine {
   }
 
   /**
+   * Remove all bot memory for a room (call on room deletion to prevent memory leaks).
+   */
+  clearRoom(roomCode) {
+    this.botMemories.delete(roomCode);
+  }
+
+  /**
    * Main turn processor for a bot
    */
   async processBotTurn(roomCode, botId, gameManager, roomManager, io, emitTurnChange) {
@@ -78,12 +85,16 @@ class BotEngine {
     await new Promise(res => setTimeout(res, 1200 + Math.random() * 1000));
 
     // Check again after delay
-    if (game.phase !== 'playing' || gameManager.getCurrentPlayerId(roomCode) !== botId) return;
+    const activeGame = gameManager.getGame(roomCode);
+    const activeRoom = roomManager.getRoom(roomCode);
+    if (!activeGame || !activeRoom || activeGame.phase !== 'playing') return;
+    if (gameManager.getCurrentPlayerId(roomCode) !== botId) return;
 
     // 1. Draw Card
     const drawResult = gameManager.drawCard(roomCode, botId);
     if (!drawResult) {
-      if (game.phase === 'round_over') {
+      if (activeGame.phase === 'round_over' && !activeGame.roundOverEmitted) {
+        activeGame.roundOverEmitted = true;
         const results = gameManager.getRoundResults(roomCode);
         io.to(roomCode).emit('round-over', { results });
       }
@@ -99,6 +110,11 @@ class BotEngine {
 
     // Thinking delay after drawing
     await new Promise(res => setTimeout(res, 1000 + Math.random() * 800));
+
+    const postDrawGame = gameManager.getGame(roomCode);
+    const postDrawRoom = roomManager.getRoom(roomCode);
+    if (!postDrawGame || !postDrawRoom || postDrawGame.phase !== 'playing') return;
+    if (gameManager.getCurrentPlayerId(roomCode) !== botId) return;
 
     // 2. Decide action
     const mem = this.getMemory(roomCode, botId);
@@ -150,12 +166,12 @@ class BotEngine {
           });
           await this._resolveBotAction(swapRes.actionTriggered, roomCode, botId, gameManager, roomManager, io, emitTurnChange);
         } else {
-          emitTurnChange(io, roomCode, gameManager);
+          emitTurnChange(io, roomCode, gameManager, roomManager);
         }
       } else {
         gameManager.discardDrawn(roomCode, botId);
         io.to(roomCode).emit('player-discarded', { playerId: botId, card: drawnCard });
-        emitTurnChange(io, roomCode, gameManager);
+        emitTurnChange(io, roomCode, gameManager, roomManager);
       }
     } else {
       // Plain card: find slot where drawn card is lower than memory of slot card
@@ -197,18 +213,18 @@ class BotEngine {
             });
             await this._resolveBotAction(swapRes.actionTriggered, roomCode, botId, gameManager, roomManager, io, emitTurnChange);
           } else {
-            emitTurnChange(io, roomCode, gameManager);
+            emitTurnChange(io, roomCode, gameManager, roomManager);
           }
         } else {
           gameManager.discardDrawn(roomCode, botId);
           io.to(roomCode).emit('player-discarded', { playerId: botId, card: drawnCard });
-          emitTurnChange(io, roomCode, gameManager);
+          emitTurnChange(io, roomCode, gameManager, roomManager);
         }
       } else {
         // Discard
         gameManager.discardDrawn(roomCode, botId);
         io.to(roomCode).emit('player-discarded', { playerId: botId, card: drawnCard });
-        emitTurnChange(io, roomCode, gameManager);
+        emitTurnChange(io, roomCode, gameManager, roomManager);
       }
     }
   }
@@ -245,11 +261,15 @@ class BotEngine {
   }
 
   async _resolveBotAction(actionType, roomCode, botId, gameManager, roomManager, io, emitTurnChange) {
-    const game = gameManager.getGame(roomCode);
-    const room = roomManager.getRoom(roomCode);
-    if (!game || !room) return;
+    let game = gameManager.getGame(roomCode);
+    let room = roomManager.getRoom(roomCode);
+    if (!game || !room || game.phase !== 'playing') return;
 
     await new Promise(res => setTimeout(res, 600));
+
+    game = gameManager.getGame(roomCode);
+    room = roomManager.getRoom(roomCode);
+    if (!game || !room || game.phase !== 'playing') return;
 
     switch (actionType) {
       case 'peek-own': {
@@ -276,6 +296,10 @@ class BotEngine {
               byPlayerId: botId
             });
           }
+          io.to(roomCode).emit('player-peeked-opponent', {
+            sourcePlayerId: botId,
+            targetPlayerId: targetOpponent
+          });
         }
         break;
       }
@@ -345,9 +369,10 @@ class BotEngine {
     }
 
     gameManager.finishActionAndAdvance(roomCode);
-    emitTurnChange(io, roomCode, gameManager);
+    emitTurnChange(io, roomCode, gameManager, roomManager);
   }
 }
 
 const botEngine = new BotEngine();
+export { BotEngine };
 export default botEngine;

@@ -4,22 +4,33 @@ import clientState from '../game/ClientState.js';
 import socketClient from '../game/SocketClient.js';
 import soundEngine from '../game/SoundEngine.js';
 import cardAnimationEngine from '../game/CardAnimationEngine.js';
-import { createTable, updateTableCenter, updateSeatHighlights } from '../components/Table.js';
+import { createTable, updateTableCenter } from '../components/Table.js';
 import { createDrawnCardPanel, removeDrawnCardPanel } from '../components/DrawnCardPanel.js';
-import { showActionModal, hideModal } from '../components/ActionModal.js';
+import { showActionModal, hideModal, queueAfterInspection } from '../components/ActionModal.js';
 import { showToast } from '../components/Toast.js';
 import { createCard } from '../components/Card.js';
 import { isActionCard, getActionType } from '../game/CardUtils.js';
 
 let currentNavigate = null;
 let registeredListeners = []; // Track all registered socket listeners for cleanup
+let peekCountdown = null;     // P1: module-level so cleanupListeners can always cancel it
+let isActionPending = false;  // Debounce in-flight user actions
 
 function cleanupListeners() {
+  isActionPending = false;
   registeredListeners.forEach(({ event, handler }) => {
     socketClient.off(event, handler);
   });
   registeredListeners = [];
+  // Cancel peek timer if it's still running (e.g. round-over fires during peek phase)
+  if (peekCountdown) {
+    clearInterval(peekCountdown);
+    peekCountdown = null;
+  }
+  cardAnimationEngine.clearAnimations();
 }
+
+export { cleanupListeners };
 
 function onSocket(event, handler) {
   socketClient.on(event, handler);
@@ -37,11 +48,12 @@ export function renderGameScreen(navigate) {
   app.innerHTML = '';
 
   // Clear any stale animation elements (UX-7)
+  cardAnimationEngine.clearAnimations();
   const animLayer = document.getElementById('card-animation-layer');
   if (animLayer) animLayer.innerHTML = '';
 
   // HUD
-  const hud = createHUD();
+  const hud = createHUD(navigate);
   app.appendChild(hud);
 
   // If we're in peek phase (and not a spectator), show the peek overlay
@@ -62,7 +74,7 @@ export function renderGameScreen(navigate) {
   setupGameListeners(navigate);
 }
 
-function createHUD() {
+function createHUD(navigate) {
   const hud = document.createElement('div');
   hud.className = 'game-hud';
 
@@ -80,7 +92,7 @@ function createHUD() {
     leaveBtn.id = 'leave-game-btn';
     leaveBtn.title = 'Leave game';
     leaveBtn.innerHTML = '🚪 <span class="hud-leave-label">Leave</span>';
-    leaveBtn.addEventListener('click', () => showLeaveConfirmModal(navigate));
+    leaveBtn.addEventListener('click', () => showLeaveConfirmModal(navigate || currentNavigate));
     left.appendChild(leaveBtn);
   }
 
@@ -177,12 +189,13 @@ function renderPeekPhase(app) {
     socketClient.emit('peek-done');
     doneBtn.disabled = true;
     doneBtn.textContent = 'Waiting for others...';
-    clearInterval(countdown);
+    clearInterval(peekCountdown);
+    peekCountdown = null;
   };
 
   doneBtn.addEventListener('click', finishPeek);
 
-  const countdown = setInterval(() => {
+  peekCountdown = setInterval(() => {
     seconds--;
     const timerEl = document.getElementById('peek-phase-timer');
     if (timerEl) timerEl.textContent = seconds;
@@ -241,8 +254,11 @@ function handleDraw() {
     showToast(`Already holding ${rankStr}. Pick a slot to swap, or click Discard.`, { type: 'info', icon: '🃏' });
     return;
   }
+  if (isActionPending) return;
+  isActionPending = true;
 
   socketClient.emit('draw-card', null, (res) => {
+    isActionPending = false;
     if (res.roundOver) {
       return;
     }
@@ -266,8 +282,11 @@ function handleDraw() {
 }
 
 function handleSwap(slotIndex) {
+  if (isActionPending) return;
+  isActionPending = true;
   soundEngine.click();
   socketClient.emit('swap-card', { slotIndex }, (res) => {
+    isActionPending = false;
     if (!res.success) {
       showToast(res.error || 'Swap failed. Please try again.', { type: 'warning', icon: '⚠️' });
       ensureDrawnCardPanel(clientState.drawnCard);
@@ -306,8 +325,14 @@ function handleSwap(slotIndex) {
 }
 
 function handleDiscard() {
+  if (isActionPending) return;
+  isActionPending = true;
   soundEngine.click();
+  // P2: Capture synchronously BEFORE the async emit — prevents stale read if
+  // 'player-discarded' arrives before the acknowledgement callback fires.
+  const discardedCard = clientState.drawnCard;
   socketClient.emit('discard-drawn', null, (res) => {
+    isActionPending = false;
     if (!res.success) {
       showToast(res.error || 'Discard failed', { type: 'error' });
       ensureDrawnCardPanel(clientState.drawnCard);
@@ -316,7 +341,6 @@ function handleDiscard() {
 
     removeDrawnCardPanel();
 
-    const discardedCard = clientState.drawnCard;
     if (discardedCard) {
       cardAnimationEngine.animateDiscard({
         playerId: clientState.playerId,
@@ -330,8 +354,12 @@ function handleDiscard() {
 }
 
 function handlePlayAction() {
+  if (isActionPending) return;
+  isActionPending = true;
   soundEngine.click();
+  const playedCard = clientState.drawnCard ? { ...clientState.drawnCard } : null;
   socketClient.emit('play-action-immediately', null, (res) => {
+    isActionPending = false;
     if (!res.success) {
       showToast(res.error || 'Failed to play action', { type: 'error' });
       ensureDrawnCardPanel(clientState.drawnCard);
@@ -339,6 +367,18 @@ function handlePlayAction() {
     }
 
     removeDrawnCardPanel();
+
+    const cardToDiscard = res.card || playedCard;
+    if (cardToDiscard) {
+      cardAnimationEngine.animateDiscard({
+        playerId: clientState.playerId,
+        card: cardToDiscard,
+        onComplete: () => {
+          clientState.addToDiscard(cardToDiscard);
+          updateTableCenter(handleDraw);
+        }
+      });
+    }
 
     cardAnimationEngine.triggerActionFX({
       actionType: res.actionType,
@@ -398,6 +438,14 @@ function setupGameListeners(navigate) {
   onSocket('turn-change', (data) => {
     clientState.updateTurn(data.currentPlayerId, data.drawPileCount);
     removeDrawnCardPanel();
+    // Do not hide modal if player is actively viewing a peek inspection (King / Queen)
+    const overlay = document.getElementById('modal-overlay');
+    const isInspectingPeek = overlay && overlay.classList.contains('active') &&
+      (overlay.querySelector('#peek-timer') || overlay.querySelector('.peek-cards'));
+    const isLeaveModal = overlay && overlay.querySelector('.leave-confirm-modal');
+    if (!isInspectingPeek && !isLeaveModal) {
+      hideModal();
+    }
     refreshTable();
     if (clientState.isMyTurn && !clientState.isSpectator) {
       soundEngine.turnNotify();
@@ -476,19 +524,40 @@ function setupGameListeners(navigate) {
 
   // Another player played an action
   onSocket('player-played-action', (data) => {
+    if (data.card && data.playerId !== clientState.playerId) {
+      cardAnimationEngine.animateDiscard({
+        playerId: data.playerId,
+        card: data.card,
+        onComplete: () => {
+          clientState.addToDiscard(data.card);
+          updateTableCenter(handleDraw);
+        }
+      });
+    }
     cardAnimationEngine.triggerActionFX({
       actionType: data.actionType,
       sourcePlayerId: data.playerId
     });
   });
 
-  // You were peeked at (Queen) — BUG-6: removed stale slotIndex
-  onSocket('you-were-peeked', (data) => {
+  // Target peeked by Queen (broadcast to whole room)
+  onSocket('player-peeked-opponent', (data) => {
     cardAnimationEngine.triggerActionFX({
       actionType: 'peek-opponent',
-      sourcePlayerId: data.byPlayerId,
-      targetPlayerId: clientState.playerId
+      sourcePlayerId: data.sourcePlayerId,
+      targetPlayerId: data.targetPlayerId
     });
+  });
+
+  // You were peeked at (Queen) - direct target event fallback
+  onSocket('you-were-peeked', (data) => {
+    if (!document.querySelector('.queen-scan-beam')) {
+      cardAnimationEngine.triggerActionFX({
+        actionType: 'peek-opponent',
+        sourcePlayerId: data.byPlayerId,
+        targetPlayerId: clientState.playerId
+      });
+    }
   });
 
   // Blind trade complete
@@ -550,10 +619,14 @@ function setupGameListeners(navigate) {
 
   // Round over
   onSocket('round-over', (data) => {
+    cleanupListeners();
     clientState.setRoundResults(data.results);
     removeDrawnCardPanel();
-    hideModal();
-    navigate('results');
+
+    queueAfterInspection(() => {
+      hideModal();
+      navigate('results');
+    });
   });
 
   // Player disconnect
@@ -596,7 +669,7 @@ function showLeaveConfirmModal(navigate) {
 
   const body = document.createElement('p');
   body.className = 'leave-confirm-body';
-  body.textContent = 'Your seat will be lost. The round will continue with a bot filling in for you.';
+  body.textContent = 'Your seat will be lost. Your turns will be auto-skipped until the round concludes.';
 
   const warning = document.createElement('div');
   warning.className = 'leave-confirm-warning';
@@ -626,6 +699,7 @@ function showLeaveConfirmModal(navigate) {
     cleanupListeners();
     removeDrawnCardPanel();
     clientState.clearSession();
+    clientState.reset();
     socketClient.disconnect();
 
     overlay.classList.remove('active');

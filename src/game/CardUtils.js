@@ -49,13 +49,7 @@ export function getActionType(card) {
   }
 }
 
-export function canSwapPlain(drawnCard, slotCard) {
-  if (!drawnCard || !slotCard) return true;
-  if (isActionCard(drawnCard)) return true; // Action cards can bank anywhere
-  const drawnVal = drawnCard.value !== undefined ? drawnCard.value : getCardValue(drawnCard);
-  const slotVal = slotCard.value !== undefined ? slotCard.value : getCardValue(slotCard);
-  return drawnVal < slotVal;
-}
+
 
 export function formatCard(card) {
   return `${card.rank}${getSuitSymbol(card.suit)}`;
